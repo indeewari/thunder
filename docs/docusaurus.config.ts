@@ -35,7 +35,7 @@ const config: Config = {
   // Prevent search engine indexing
   // TODO: Remove this flag when the docs are ready for public access
   // Tracker: https://github.com/asgardeo/thunder/issues/1209
-  noIndex: true,
+  // noIndex: true,
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
@@ -69,6 +69,18 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           // Edit URL for the "edit this page" feature.
           editUrl: thunderConfig.project.source.github.editUrls.content,
+          // --- Versioning ---
+          routeBasePath: 'docs',
+          lastVersion: 'current',
+          versions: {
+            current: {
+              label: 'Next',
+              path: 'next',
+            },
+            '0.19.0': {
+              noIndex: true,
+            },
+          },
         },
         blog: {
           showReadingTime: true,
@@ -117,6 +129,10 @@ const config: Config = {
           position: 'left',
           label: 'Docs',
           className: 'navbar__link--docs',
+        },
+        {
+          type: 'docsVersionDropdown',
+          position: 'right',
         },
         {
           to: '/apis',
