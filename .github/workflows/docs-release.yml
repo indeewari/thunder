@@ -22,14 +22,19 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: docs
         run: pnpm install --frozen-lockfile
 
       - name: Create docs version from tag
+        working-directory: docs
         run: pnpm docs:version:from-tag
 
       - name: Build & deploy docs
+        working-directory: docs
         run: pnpm deploy
         env:
           GIT_USER: github-actions[bot]
+
