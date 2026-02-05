@@ -10,27 +10,46 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout the repo with full history and tags
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          tags: true
 
+      # 2️⃣ Setup PNPM
       - uses: pnpm/action-setup@v4
         with:
           version: 9
 
+      # 3️⃣ Setup Node with PNPM caching
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          # Conditional caching: will fallback if pnpm-lock.yaml missing
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            **/pnpm-lock.yaml
 
+      # 4️⃣ Debug: confirm lock file exists
+      - name: Check lock file
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "pnpm-lock.yaml exists"
+          else
+            echo "WARNING: pnpm-lock.yaml not found"
+          fi
+
+      # 5️⃣ Install dependencies
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
+      # 6️⃣ Version docs from tag
       - name: Create docs version from tag
         working-directory: docs
         run: pnpm docs:version:from-tag
 
+      # 7️⃣ Build and deploy docs
       - name: Build & deploy docs
         working-directory: docs
         run: pnpm deploy
