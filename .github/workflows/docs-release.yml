@@ -27,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: docs
-        run: pnpm install --no--frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Create docs version from tag
         working-directory: docs
