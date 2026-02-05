@@ -26,22 +26,21 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          # Conditional caching: will fallback if pnpm-lock.yaml missing
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            **/pnpm-lock.yaml
+          # Point to the lock file inside the docs folder
+          cache-dependency-path: docs/pnpm-lock.yaml
 
       # 4️⃣ Debug: confirm lock file exists
-      - name: Check lock file
+      - name: Check docs lock file
         run: |
-          if [ -f pnpm-lock.yaml ]; then
-            echo "pnpm-lock.yaml exists"
+          if [ -f docs/pnpm-lock.yaml ]; then
+            echo "docs/pnpm-lock.yaml exists"
           else
-            echo "WARNING: pnpm-lock.yaml not found"
+            echo "WARNING: docs/pnpm-lock.yaml not found"
           fi
 
-      # 5️⃣ Install dependencies
+      # 5️⃣ Install dependencies in docs folder
       - name: Install dependencies
+        working-directory: docs
         run: pnpm install --no-frozen-lockfile
 
       # 6️⃣ Version docs from tag
