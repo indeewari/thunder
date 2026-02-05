@@ -14,19 +14,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Install pnpm (this also sets PNPM_HOME correctly)
       - uses: pnpm/action-setup@v4
         with:
           version: 9
-          run_install: false
 
-      # Install Node ONLY (no pnpm cache here)
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
-        working-directory: docs
         run: pnpm install --no-frozen-lockfile
 
       - name: Create docs version from tag
