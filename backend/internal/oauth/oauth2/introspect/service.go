@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -25,6 +25,7 @@ import (
 
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/constants"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement"
 	"github.com/thunder-id/thunderid/internal/system/jose/jwt"
 	"github.com/thunder-id/thunderid/internal/system/log"
 )
@@ -36,13 +37,18 @@ type TokenIntrospectionServiceInterface interface {
 
 // tokenIntrospectionService implements the TokenIntrospectionServiceInterface.
 type tokenIntrospectionService struct {
-	jwtService jwt.JWTServiceInterface
+	jwtService        jwt.JWTServiceInterface
+	revocationChecker enforcement.CheckerInterface
 }
 
 // newTokenIntrospectionService creates a new tokenIntrospectionService instance (internal use).
-func newTokenIntrospectionService(jwtService jwt.JWTServiceInterface) TokenIntrospectionServiceInterface {
+func newTokenIntrospectionService(
+	jwtService jwt.JWTServiceInterface,
+	revocationChecker enforcement.CheckerInterface,
+) TokenIntrospectionServiceInterface {
 	return &tokenIntrospectionService{
-		jwtService: jwtService,
+		jwtService:        jwtService,
+		revocationChecker: revocationChecker,
 	}
 }
 
@@ -71,8 +77,19 @@ func (s *tokenIntrospectionService) IntrospectToken(
 		}, nil
 	}
 
-	// TODO: Add validations for token revocation and validity to be used by the resource server
-	//  who makes the introspection call when the support is implemented.
+	// Enforce the RFC 7009 deny list. A revoked token is inactive; if the deny list cannot be
+	// consulted we fail closed (surface a server error) rather than asserting the token is active.
+	jti, _ := payload[constants.ClaimJTI].(string)
+	if revErr := s.revocationChecker.EnsureNotRevoked(ctx, jti); revErr != nil {
+		if errors.Is(revErr, enforcement.ErrTokenRevoked) {
+			return &IntrospectResponse{
+				Active: false,
+			}, nil
+		}
+		logger.Error(ctx, "Token revocation status could not be verified; failing closed",
+			log.Error(revErr))
+		return nil, revErr
+	}
 
 	return s.prepareValidResponse(payload), nil
 }

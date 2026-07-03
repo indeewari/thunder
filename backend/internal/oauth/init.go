@@ -31,6 +31,7 @@ import (
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/ciba"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/discovery"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/granthandlers"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/introspect"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/jwksresolver"
@@ -83,12 +84,16 @@ func Initialize(
 	if err != nil {
 		return err
 	}
+	// Shared deny-list checker (RFC 7009 enforcement) with a circuit breaker and fail-closed
+	// policy, used across the hot path: refresh grant, token exchange, and introspection.
+	revocationChecker := enforcement.NewChecker(observabilitySvc)
 	grantHandlerProvider := granthandlers.Initialize(
 		jwtService, oauth2AuthzService, tokenBuilder, tokenValidator,
-		attributeCacheSvc, ouService, authzService, actorProvider, resourceService, cibaService, cfg)
+		attributeCacheSvc, ouService, authzService, actorProvider, resourceService, cibaService, cfg,
+		revocationChecker)
 	token.Initialize(mux, jwtService, actorProvider, authnProvider, grantHandlerProvider,
 		scopeValidator, observabilitySvc, discoveryService, dpopVerifier, cfg)
-	introspect.Initialize(mux, jwtService, actorProvider, authnProvider, discoveryService)
+	introspect.Initialize(mux, jwtService, actorProvider, authnProvider, discoveryService, revocationChecker)
 	revocation.Initialize(mux, jwtService, actorProvider, authnProvider, discoveryService, observabilitySvc)
 	userinfo.Initialize(mux, jwtService, jweService, resolver,
 		tokenValidator, actorProvider, attributeCacheSvc,

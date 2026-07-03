@@ -29,6 +29,14 @@ packages:
       pkgname: cache
       filename: "{{.InterfaceName}}_mock_test.go"
 
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement:
+    config:
+      all: true
+      dir: internal/oauth/oauth2/enforcement
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: enforcement
+      filename: "{{.InterfaceName}}_mock_test.go"
+
   github.com/thunder-id/thunderid/internal/oauth/oauth2/introspect:
     config:
       all: true

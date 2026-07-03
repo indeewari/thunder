@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -144,6 +144,7 @@ func (tv *tokenValidator) ValidateRefreshToken(
 	scopes := extractScopesFromClaims(claims, false)
 	attributeCacheID, _ := extractStringClaim(claims, "aci")
 	actorSub, _ := extractStringClaim(claims, "act_sub")
+	jti, _ := extractStringClaim(claims, "jti")
 
 	// Extract claims request if present
 	var claimsRequest *oauth2model.ClaimsRequest
@@ -180,6 +181,7 @@ func (tv *tokenValidator) ValidateRefreshToken(
 		ClaimsLocales:    claimsLocales,
 		DPoPJkt:          dpopJkt,
 		ActorSub:         actorSub,
+		JTI:              jti,
 	}, nil
 }
 
@@ -332,6 +334,13 @@ func (tv *tokenValidator) extractSubjectTokenClaims(
 		return nil, err
 	}
 
+	// Only self-issued tokens participate in deny-list (revocation) enforcement; an external
+	// issuer's jti has no meaning in this server's deny list.
+	var jti string
+	if tv.isSelfIssuer(iss) {
+		jti, _ = extractStringClaim(claims, "jti")
+	}
+
 	return &SubjectTokenClaims{
 		Sub:            sub,
 		Iss:            iss,
@@ -340,6 +349,7 @@ func (tv *tokenValidator) extractSubjectTokenClaims(
 		UserAttributes: userAttributes,
 		NestedAct:      nestedAct,
 		CnfJkt:         cnfJkt,
+		JTI:            jti,
 	}, nil
 }
 

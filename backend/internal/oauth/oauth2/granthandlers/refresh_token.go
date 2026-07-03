@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -20,6 +20,7 @@ package granthandlers
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ import (
 	oauthconfig "github.com/thunder-id/thunderid/internal/oauth/config"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/constants"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/model"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/resourceindicators"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/tokenservice"
@@ -41,12 +43,13 @@ import (
 
 // refreshTokenGrantHandler handles the refresh token grant type.
 type refreshTokenGrantHandler struct {
-	cfg              oauthconfig.Config
-	jwtService       jwt.JWTServiceInterface
-	tokenBuilder     tokenservice.TokenBuilderInterface
-	tokenValidator   tokenservice.TokenValidatorInterface
-	attrCacheService attributecache.AttributeCacheServiceInterface
-	resourceService  providers.ResourceServerProvider
+	cfg               oauthconfig.Config
+	jwtService        jwt.JWTServiceInterface
+	tokenBuilder      tokenservice.TokenBuilderInterface
+	tokenValidator    tokenservice.TokenValidatorInterface
+	attrCacheService  attributecache.AttributeCacheServiceInterface
+	resourceService   providers.ResourceServerProvider
+	revocationChecker enforcement.CheckerInterface
 }
 
 // newRefreshTokenGrantHandler creates a new instance of RefreshTokenGrantHandler.
@@ -57,14 +60,16 @@ func newRefreshTokenGrantHandler(
 	attrCacheService attributecache.AttributeCacheServiceInterface,
 	resourceService providers.ResourceServerProvider,
 	cfg oauthconfig.Config,
+	revocationChecker enforcement.CheckerInterface,
 ) RefreshTokenGrantHandlerInterface {
 	return &refreshTokenGrantHandler{
-		cfg:              cfg,
-		jwtService:       jwtService,
-		tokenBuilder:     tokenBuilder,
-		tokenValidator:   tokenValidator,
-		attrCacheService: attrCacheService,
-		resourceService:  resourceService,
+		cfg:               cfg,
+		jwtService:        jwtService,
+		tokenBuilder:      tokenBuilder,
+		tokenValidator:    tokenValidator,
+		attrCacheService:  attrCacheService,
+		resourceService:   resourceService,
+		revocationChecker: revocationChecker,
 	}
 }
 
@@ -115,6 +120,12 @@ func (h *refreshTokenGrantHandler) HandleGrant(ctx context.Context, tokenRequest
 	}
 
 	if errResp := dpop.VerifyProofBinding(ctx, refreshTokenClaims.DPoPJkt, "refresh token"); errResp != nil {
+		return nil, errResp
+	}
+
+	// Reject refresh tokens that have been revoked (RFC 7009 deny list). Fail closed when the
+	// operation DB cannot be consulted.
+	if errResp := h.checkRevocation(ctx, refreshTokenClaims.JTI, logger); errResp != nil {
 		return nil, errResp
 	}
 
@@ -368,6 +379,30 @@ func (h *refreshTokenGrantHandler) extendCacheTTL(
 		}
 	}
 	return nil
+}
+
+// checkRevocation enforces the deny list for the refresh token's JTI. A revoked token is rejected
+// with invalid_grant; an operation-DB outage fails closed with server_error (transient).
+func (h *refreshTokenGrantHandler) checkRevocation(
+	ctx context.Context, jti string, logger *log.Logger,
+) *model.ErrorResponse {
+	err := h.revocationChecker.EnsureNotRevoked(ctx, jti)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, enforcement.ErrTokenRevoked) {
+		logger.Debug(ctx, "Refresh token has been revoked")
+		return &model.ErrorResponse{
+			Error:            constants.ErrorInvalidGrant,
+			ErrorDescription: "Invalid refresh token",
+		}
+	}
+	logger.Error(ctx, "Token revocation status could not be verified; failing closed",
+		log.Error(err))
+	return &model.ErrorResponse{
+		Error:            constants.ErrorServerError,
+		ErrorDescription: "Token revocation status could not be verified",
+	}
 }
 
 // validateAndApplyScopes validates and applies OAuth2 scope downscoping logic per RFC 6749 §6.

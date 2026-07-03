@@ -117,6 +117,14 @@ packages:
           pkgname: authzmock
           filename: "{{.InterfaceName}}_mock.go"
 
+  github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement:
+    config:
+      all: true
+      dir: tests/mocks/oauth/oauth2/enforcementmock
+      structname: '{{.InterfaceName}}Mock'
+      pkgname: enforcementmock
+      filename: "{{.InterfaceName}}_mock.go"
+
   github.com/thunder-id/thunderid/internal/oauth/oauth2/granthandlers:
     config:
       all: true

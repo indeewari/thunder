@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -35,12 +36,13 @@ import (
 const (
 	testServerURL = "https://localhost:8095"
 
-	clientIDOwner  = "revoke_owner_client"
-	secretOwner    = "revoke_owner_secret"
-	clientIDOther  = "revoke_other_client"
-	secretOther    = "revoke_other_secret"
-	revokeEndpoint = testServerURL + "/oauth2/revoke"
-	tokenEndpoint  = testServerURL + "/oauth2/token"
+	clientIDOwner      = "revoke_owner_client"
+	secretOwner        = "revoke_owner_secret"
+	clientIDOther      = "revoke_other_client"
+	secretOther        = "revoke_other_secret"
+	revokeEndpoint     = testServerURL + "/oauth2/revoke"
+	tokenEndpoint      = testServerURL + "/oauth2/token"
+	introspectEndpoint = testServerURL + "/oauth2/introspect"
 )
 
 // RevocationTestSuite exercises the RFC 7009 POST /oauth2/revoke endpoint end-to-end:
@@ -100,7 +102,7 @@ func (ts *RevocationTestSuite) createApp(name, clientID, clientSecret string) st
 					"clientId":                clientID,
 					"clientSecret":            clientSecret,
 					"redirectUris":            []string{"https://localhost:3000"},
-					"grantTypes":              []string{"client_credentials"},
+					"grantTypes":              []string{"client_credentials", "urn:ietf:params:oauth:grant-type:token-exchange"},
 					"tokenEndpointAuthMethod": "client_secret_basic",
 				},
 			},
@@ -179,6 +181,42 @@ func (ts *RevocationTestSuite) revoke(token, clientID, clientSecret string, auth
 	return resp
 }
 
+// introspectActive posts an introspection request for the token and returns its "active" status.
+func (ts *RevocationTestSuite) introspectActive(token, clientID, clientSecret string) bool {
+	req, err := http.NewRequest(http.MethodPost, introspectEndpoint, strings.NewReader("token="+token))
+	ts.Require().NoError(err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(clientID, clientSecret)
+
+	resp, err := ts.client.Do(req)
+	ts.Require().NoError(err)
+	defer resp.Body.Close()
+	ts.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	var body map[string]interface{}
+	ts.Require().NoError(json.NewDecoder(resp.Body).Decode(&body))
+	active, _ := body["active"].(bool)
+	return active
+}
+
+// exchange performs an RFC 8693 token exchange using the given self-issued access token as the
+// subject_token, authenticated with client_secret_basic.
+func (ts *RevocationTestSuite) exchange(subjectToken, clientID, clientSecret string) *http.Response {
+	form := url.Values{}
+	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+	form.Set("subject_token", subjectToken)
+	form.Set("subject_token_type", "urn:ietf:params:oauth:token-type:access_token")
+
+	req, err := http.NewRequest(http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	ts.Require().NoError(err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(clientID, clientSecret)
+
+	resp, err := ts.client.Do(req)
+	ts.Require().NoError(err)
+	return resp
+}
+
 func decodeError(resp *http.Response) string {
 	var body map[string]interface{}
 	_ = json.NewDecoder(resp.Body).Decode(&body)
@@ -231,6 +269,43 @@ func (ts *RevocationTestSuite) TestRevoke_InvalidClientAuthReturnsInvalidClient(
 	defer resp.Body.Close()
 	ts.Assert().Equal(http.StatusUnauthorized, resp.StatusCode)
 	ts.Assert().Equal("invalid_client", decodeError(resp))
+}
+
+// M2 deny-list enforcement: a token is active before revocation and inactive afterwards when
+// introspected on the AS hot path.
+func (ts *RevocationTestSuite) TestIntrospect_ReflectsRevocation() {
+	token := ts.getAccessToken(clientIDOwner, secretOwner)
+
+	ts.Assert().True(ts.introspectActive(token, clientIDOwner, secretOwner),
+		"token should be active before revocation")
+
+	resp := ts.revoke(token, clientIDOwner, secretOwner, true)
+	resp.Body.Close()
+	ts.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	ts.Assert().False(ts.introspectActive(token, clientIDOwner, secretOwner),
+		"token should be inactive after revocation")
+}
+
+// M2 deny-list enforcement on token exchange: a self-issued subject token is accepted for exchange
+// before revocation and rejected with invalid_request afterwards.
+func (ts *RevocationTestSuite) TestTokenExchange_RejectsRevokedSubjectToken() {
+	subject := ts.getAccessToken(clientIDOwner, secretOwner)
+
+	// Before revocation the subject token is accepted for exchange.
+	resp := ts.exchange(subject, clientIDOwner, secretOwner)
+	resp.Body.Close()
+	ts.Require().Equal(http.StatusOK, resp.StatusCode, "exchange should succeed before revocation")
+
+	revokeResp := ts.revoke(subject, clientIDOwner, secretOwner, true)
+	revokeResp.Body.Close()
+	ts.Require().Equal(http.StatusOK, revokeResp.StatusCode)
+
+	// After revocation the subject token is rejected on the exchange hot path.
+	resp2 := ts.exchange(subject, clientIDOwner, secretOwner)
+	defer resp2.Body.Close()
+	ts.Assert().Equal(http.StatusBadRequest, resp2.StatusCode)
+	ts.Assert().Equal("invalid_request", decodeError(resp2))
 }
 
 // A client cannot revoke a token issued to a different client — 400 invalid_grant.

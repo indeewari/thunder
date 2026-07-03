@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -37,12 +37,14 @@ import (
 	oauthconfig "github.com/thunder-id/thunderid/internal/oauth/config"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/constants"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/dpop"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/model"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/tokenservice"
 	"github.com/thunder-id/thunderid/internal/system/config"
 	"github.com/thunder-id/thunderid/internal/system/log"
 	"github.com/thunder-id/thunderid/tests/mocks/attributecachemock"
 	"github.com/thunder-id/thunderid/tests/mocks/jose/jwtmock"
+	"github.com/thunder-id/thunderid/tests/mocks/oauth/oauth2/enforcementmock"
 	"github.com/thunder-id/thunderid/tests/mocks/oauth/oauth2/tokenservicemock"
 	"github.com/thunder-id/thunderid/tests/mocks/resourcemock"
 	"github.com/thunder-id/thunderid/tests/testhelpers"
@@ -58,16 +60,17 @@ const testRS02URI = "https://rs02.example.com"
 type RefreshTokenGrantHandlerTestSuite struct {
 	testCfg oauthconfig.Config
 	suite.Suite
-	handler              *refreshTokenGrantHandler
-	mockJWTService       *jwtmock.JWTServiceInterfaceMock
-	mockTokenBuilder     *tokenservicemock.TokenBuilderInterfaceMock
-	mockTokenValidator   *tokenservicemock.TokenValidatorInterfaceMock
-	mockAttrCacheService *attributecachemock.AttributeCacheServiceInterfaceMock
-	mockResourceService  *resourcemock.ResourceServiceInterfaceMock
-	oauthApp             *providers.OAuthClient
-	validRefreshToken    string
-	validClaims          map[string]interface{}
-	testTokenReq         *model.TokenRequest
+	handler               *refreshTokenGrantHandler
+	mockJWTService        *jwtmock.JWTServiceInterfaceMock
+	mockTokenBuilder      *tokenservicemock.TokenBuilderInterfaceMock
+	mockTokenValidator    *tokenservicemock.TokenValidatorInterfaceMock
+	mockAttrCacheService  *attributecachemock.AttributeCacheServiceInterfaceMock
+	mockResourceService   *resourcemock.ResourceServiceInterfaceMock
+	mockRevocationChecker *enforcementmock.CheckerInterfaceMock
+	oauthApp              *providers.OAuthClient
+	validRefreshToken     string
+	validClaims           map[string]interface{}
+	testTokenReq          *model.TokenRequest
 }
 
 func TestRefreshTokenGrantHandlerSuite(t *testing.T) {
@@ -98,6 +101,9 @@ func (suite *RefreshTokenGrantHandlerTestSuite) SetupTest() {
 	suite.mockTokenValidator = tokenservicemock.NewTokenValidatorInterfaceMock(suite.T())
 	suite.mockAttrCacheService = attributecachemock.NewAttributeCacheServiceInterfaceMock(suite.T())
 	suite.mockResourceService = resourcemock.NewResourceServiceInterfaceMock(suite.T())
+	suite.mockRevocationChecker = enforcementmock.NewCheckerInterfaceMock(suite.T())
+	// Default: tokens are not revoked. Individual tests override this to exercise enforcement.
+	suite.mockRevocationChecker.On("EnsureNotRevoked", mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	suite.mockResourceService.On("GetResourceServerByIdentifier", mock.Anything, mock.Anything).
 		Return(func(_ context.Context, identifier string) *providers.ResourceServer {
@@ -149,6 +155,7 @@ func (suite *RefreshTokenGrantHandlerTestSuite) rebuildHandlerWithConfig() {
 		suite.mockAttrCacheService,
 		suite.mockResourceService,
 		suite.testCfg,
+		suite.mockRevocationChecker,
 	).(*refreshTokenGrantHandler)
 }
 
@@ -161,7 +168,7 @@ func (suite *RefreshTokenGrantHandlerTestSuite) TestNewRefreshTokenGrantHandler(
 		suite.mockTokenBuilder,
 		suite.mockTokenValidator,
 		suite.mockAttrCacheService,
-		suite.mockResourceService, testhelpers.OAuthConfig())
+		suite.mockResourceService, testhelpers.OAuthConfig(), suite.mockRevocationChecker)
 	assert.NotNil(suite.T(), handler)
 	assert.Implements(suite.T(), (*RefreshTokenGrantHandlerInterface)(nil), handler)
 }
@@ -220,6 +227,67 @@ func (suite *RefreshTokenGrantHandlerTestSuite) TestHandleGrant_InvalidSignature
 	assert.NotNil(suite.T(), err)
 	assert.Equal(suite.T(), constants.ErrorInvalidGrant, err.Error)
 	assert.Equal(suite.T(), "Invalid refresh token", err.ErrorDescription)
+}
+
+// A revoked refresh token is rejected with invalid_grant (RFC 7009 deny-list enforcement).
+func (suite *RefreshTokenGrantHandlerTestSuite) TestHandleGrant_RevokedRefreshToken() {
+	suite.mockTokenValidator.
+		On("ValidateRefreshToken", mock.Anything, suite.validRefreshToken, testRefreshTokenClientID).
+		Return(&tokenservice.RefreshTokenClaims{
+			Sub:       testRefreshTokenUserID,
+			Audiences: []string{testRefreshTokenAudience},
+			GrantType: "authorization_code",
+			Scopes:    []string{"read", "write"},
+			JTI:       "rt-jti-revoked",
+		}, nil)
+
+	checker := enforcementmock.NewCheckerInterfaceMock(suite.T())
+	checker.On("EnsureNotRevoked", mock.Anything, "rt-jti-revoked").Return(enforcement.ErrTokenRevoked)
+	handler := suite.handlerWithChecker(checker)
+
+	response, err := handler.HandleGrant(context.Background(), suite.testTokenReq, suite.oauthApp)
+
+	assert.Nil(suite.T(), response)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), constants.ErrorInvalidGrant, err.Error)
+}
+
+// When the deny list cannot be consulted, the refresh grant fails closed with server_error.
+func (suite *RefreshTokenGrantHandlerTestSuite) TestHandleGrant_EnforcementUnavailableFailsClosed() {
+	suite.mockTokenValidator.
+		On("ValidateRefreshToken", mock.Anything, suite.validRefreshToken, testRefreshTokenClientID).
+		Return(&tokenservice.RefreshTokenClaims{
+			Sub:       testRefreshTokenUserID,
+			Audiences: []string{testRefreshTokenAudience},
+			GrantType: "authorization_code",
+			Scopes:    []string{"read", "write"},
+			JTI:       "rt-jti-unknown",
+		}, nil)
+
+	checker := enforcementmock.NewCheckerInterfaceMock(suite.T())
+	checker.On("EnsureNotRevoked", mock.Anything, "rt-jti-unknown").Return(enforcement.ErrEnforcementUnavailable)
+	handler := suite.handlerWithChecker(checker)
+
+	response, err := handler.HandleGrant(context.Background(), suite.testTokenReq, suite.oauthApp)
+
+	assert.Nil(suite.T(), response)
+	assert.NotNil(suite.T(), err)
+	assert.Equal(suite.T(), constants.ErrorServerError, err.Error)
+}
+
+// handlerWithChecker builds a handler identical to the suite's but with a dedicated revocation
+// checker, so enforcement behavior can be asserted without colliding with the default stub.
+func (suite *RefreshTokenGrantHandlerTestSuite) handlerWithChecker(
+	checker *enforcementmock.CheckerInterfaceMock,
+) *refreshTokenGrantHandler {
+	return &refreshTokenGrantHandler{
+		jwtService:        suite.mockJWTService,
+		tokenBuilder:      suite.mockTokenBuilder,
+		tokenValidator:    suite.mockTokenValidator,
+		attrCacheService:  suite.mockAttrCacheService,
+		resourceService:   suite.mockResourceService,
+		revocationChecker: checker,
+	}
 }
 
 func (suite *RefreshTokenGrantHandlerTestSuite) TestIssueRefreshToken_Success() {

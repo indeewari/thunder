@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -103,6 +103,8 @@ type RefreshTokenClaims struct {
 	ClaimsLocales    string
 	DPoPJkt          string
 	ActorSub         string
+	// JTI is the refresh token's unique identifier, used for deny-list (revocation) enforcement.
+	JTI string
 }
 
 // SubjectTokenClaims represents the validated claims from a subject token (for token exchange).
@@ -116,6 +118,9 @@ type SubjectTokenClaims struct {
 	// CnfJkt is the JWK thumbprint extracted from the subject token's cnf.jkt claim.
 	// Empty when the subject token is not DPoP-bound.
 	CnfJkt string
+	// JTI is the subject token's unique identifier, populated only for self-issued tokens and used
+	// for deny-list (revocation) enforcement. Empty for externally-issued subject tokens.
+	JTI string
 }
 
 // AccessTokenClaims represents the validated claims from an access token.

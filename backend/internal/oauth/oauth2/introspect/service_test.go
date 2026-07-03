@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -30,8 +30,10 @@ import (
 	"time"
 
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/constants"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement"
 	"github.com/thunder-id/thunderid/internal/system/cryptolib"
 	"github.com/thunder-id/thunderid/tests/mocks/jose/jwtmock"
+	"github.com/thunder-id/thunderid/tests/mocks/oauth/oauth2/enforcementmock"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -40,13 +42,14 @@ import (
 
 type TokenIntrospectionServiceTestSuite struct {
 	suite.Suite
-	jwtServiceMock     *jwtmock.JWTServiceInterfaceMock
-	introspectService  TokenIntrospectionServiceInterface
-	validToken         string
-	expiredToken       string
-	notBeforeToken     string
-	missingClaimsToken string
-	privateKey         *rsa.PrivateKey
+	jwtServiceMock        *jwtmock.JWTServiceInterfaceMock
+	revocationCheckerMock *enforcementmock.CheckerInterfaceMock
+	introspectService     TokenIntrospectionServiceInterface
+	validToken            string
+	expiredToken          string
+	notBeforeToken        string
+	missingClaimsToken    string
+	privateKey            *rsa.PrivateKey
 }
 
 func TestTokenIntrospectionServiceTestSuite(t *testing.T) {
@@ -55,6 +58,9 @@ func TestTokenIntrospectionServiceTestSuite(t *testing.T) {
 
 func (s *TokenIntrospectionServiceTestSuite) SetupTest() {
 	s.jwtServiceMock = jwtmock.NewJWTServiceInterfaceMock(s.T())
+	s.revocationCheckerMock = enforcementmock.NewCheckerInterfaceMock(s.T())
+	// Default: tokens are not revoked. Individual tests override this to exercise enforcement.
+	s.revocationCheckerMock.On("EnsureNotRevoked", mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// Create a private key for signing JWT tokens
 	var err error
@@ -63,12 +69,40 @@ func (s *TokenIntrospectionServiceTestSuite) SetupTest() {
 		s.T().Fatal("Error generating RSA key:", err)
 	}
 
-	s.introspectService = newTokenIntrospectionService(s.jwtServiceMock)
+	s.introspectService = newTokenIntrospectionService(s.jwtServiceMock, s.revocationCheckerMock)
 
 	s.validToken = s.createValidToken()
 	s.expiredToken = s.createExpiredToken()
 	s.notBeforeToken = s.createNotBeforeToken()
 	s.missingClaimsToken = s.createMissingClaimsToken()
+}
+
+// A revoked but otherwise valid token is reported inactive (RFC 7009 deny-list enforcement).
+func (s *TokenIntrospectionServiceTestSuite) TestIntrospectToken_RevokedToken_IsInactive() {
+	s.jwtServiceMock.On("VerifyJWT", mock.Anything, s.validToken, "", "").Return(nil)
+	checker := enforcementmock.NewCheckerInterfaceMock(s.T())
+	checker.On("EnsureNotRevoked", mock.Anything, "token-id-123").Return(enforcement.ErrTokenRevoked)
+	svc := newTokenIntrospectionService(s.jwtServiceMock, checker)
+
+	response, err := svc.IntrospectToken(context.Background(), s.validToken, "")
+
+	assert.NoError(s.T(), err)
+	assert.NotNil(s.T(), response)
+	assert.False(s.T(), response.Active)
+}
+
+// When the deny list cannot be consulted, introspection fails closed with a server error rather
+// than asserting the token is active.
+func (s *TokenIntrospectionServiceTestSuite) TestIntrospectToken_EnforcementUnavailable_FailsClosed() {
+	s.jwtServiceMock.On("VerifyJWT", mock.Anything, s.validToken, "", "").Return(nil)
+	checker := enforcementmock.NewCheckerInterfaceMock(s.T())
+	checker.On("EnsureNotRevoked", mock.Anything, "token-id-123").Return(enforcement.ErrEnforcementUnavailable)
+	svc := newTokenIntrospectionService(s.jwtServiceMock, checker)
+
+	response, err := svc.IntrospectToken(context.Background(), s.validToken, "")
+
+	assert.Error(s.T(), err)
+	assert.Nil(s.T(), response)
 }
 
 func (s *TokenIntrospectionServiceTestSuite) TestIntrospectToken_EmptyToken() {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2025-2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -24,6 +24,7 @@ import (
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/authz"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/ciba"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/constants"
+	"github.com/thunder-id/thunderid/internal/oauth/oauth2/enforcement"
 	"github.com/thunder-id/thunderid/internal/oauth/oauth2/tokenservice"
 	"github.com/thunder-id/thunderid/internal/system/jose/jwt"
 	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
@@ -56,6 +57,7 @@ func newGrantHandlerProvider(
 	resourceService providers.ResourceServerProvider,
 	cibaService ciba.CIBAServiceInterface,
 	cfg oauthconfig.Config,
+	revocationChecker enforcement.CheckerInterface,
 ) GrantHandlerProviderInterface {
 	return &GrantHandlerProvider{
 		clientCredentialsGrantHandler: newClientCredentialsGrantHandler(
@@ -63,9 +65,9 @@ func newGrantHandlerProvider(
 		authorizationCodeGrantHandler: newAuthorizationCodeGrantHandler(
 			authzService, tokenBuilder, attrCacheService, resourceService),
 		refreshTokenGrantHandler: newRefreshTokenGrantHandler(
-			jwtService, tokenBuilder, tokenValidator, attrCacheService, resourceService, cfg),
+			jwtService, tokenBuilder, tokenValidator, attrCacheService, resourceService, cfg, revocationChecker),
 		tokenExchangeGrantHandler: newTokenExchangeGrantHandler(
-			tokenBuilder, tokenValidator, resourceService),
+			tokenBuilder, tokenValidator, resourceService, revocationChecker),
 		cibaGrantHandler: newCIBAGrantHandler(cibaService, tokenBuilder, attrCacheService),
 	}
 }

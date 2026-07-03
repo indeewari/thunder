@@ -46,6 +46,10 @@ const (
 	// EventTypeTokenRevoked is triggered when a token is revoked (RFC 7009).
 	EventTypeTokenRevoked providers.EventType = "TOKEN_REVOKED" //nolint:gosec
 
+	// EventTypeOperationDBUnavailable is triggered when the operation database backing the
+	// deny-list (revocation) check becomes unavailable and enforcement fails closed.
+	EventTypeOperationDBUnavailable providers.EventType = "OPERATION_DB_UNAVAILABLE"
+
 	// Flow Execution Events
 
 	// EventTypeFlowStarted is triggered when a flow execution begins.
