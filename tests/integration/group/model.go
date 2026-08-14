@@ -1,4 +1,4 @@
-// Copyright 2025 The ThunderID Authors
+// Copyright 2025-2026 The ThunderID Authors
 // SPDX-License-Identifier: Apache-2.0
 
 package group
@@ -39,12 +39,15 @@ type MemberType string
 const (
 	MemberTypeUser  MemberType = "user"
 	MemberTypeGroup MemberType = "group"
+	MemberTypeApp   MemberType = "app"
 )
 
-// Member represents a member of a group (either user or another group).
+// Member represents a member of a group (a user, an application, or another group).
 type Member struct {
 	Id   string     `json:"id"`
 	Type MemberType `json:"type"`
+	// Display is only populated when the request asks for display attributes with include=display.
+	Display string `json:"display,omitempty"`
 }
 
 // GroupBasic represents the basic information of a group.
@@ -53,6 +56,8 @@ type GroupBasic struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	OUID        string `json:"ouId"`
+	// OUHandle is only populated when the request asks for display attributes with include=display.
+	OUHandle string `json:"ouHandle,omitempty"`
 }
 
 // Group represents a complete group with members.

@@ -159,6 +159,31 @@ func initiateAuthorizationFlow(clientID, redirectURI, responseType, scope, state
 	return resp, nil
 }
 
+// SubmitAuthorizationRequest sends an arbitrary parameter set to the authorization endpoint without
+// following redirects, so the caller can assert on the redirect the server produced. Use this for
+// parameters the InitiateAuthorizationFlow variants do not cover, such as prompt.
+func SubmitAuthorizationRequest(params url.Values) (*http.Response, error) {
+	req, err := http.NewRequest("GET", TestServerURL+"/oauth2/authorize?"+params.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create authorization request: %w", err)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send authorization request: %w", err)
+	}
+	return resp, nil
+}
+
 // ExecuteAuthenticationFlow executes an authentication flow and returns the flow step.
 func ExecuteAuthenticationFlow(executionId string, inputs map[string]string, action string,
 	challengeToken ...string) (*FlowStep, error) {
@@ -1317,6 +1342,76 @@ func (k *DPoPKey) CreateProof(htm, htu string, opts DPoPProofOptions) (string, e
 		sig[len(sig)-1] ^= 0x01
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// CreateSignedJWT signs an arbitrary header and claims set with the key and returns the compact JWS.
+// The "alg" header defaults to the key's natural algorithm when the caller does not set it. Tests use
+// this to mint client assertions (RFC 7523) and other client-signed JWTs, including malformed ones.
+func (k *DPoPKey) CreateSignedJWT(header, claims map[string]any) (string, error) {
+	fullHeader := make(map[string]any, len(header)+1)
+	fullHeader["alg"] = k.Alg
+	for name, value := range header {
+		fullHeader[name] = value
+	}
+
+	headerJSON, err := json.Marshal(fullHeader)
+	if err != nil {
+		return "", err
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) +
+		"." + base64.RawURLEncoding.EncodeToString(claimsJSON)
+
+	alg, _ := fullHeader["alg"].(string)
+	sig, err := signProof(k.Private, alg, signingInput)
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// NewJTI returns a fresh url-safe identifier suitable for a "jti" claim.
+func NewJTI() string {
+	return randomJTI()
+}
+
+// SubmitTokenRequest posts the given form to the token endpoint without adding any client
+// authentication, so the caller controls how the client authenticates (for example with a
+// client assertion). It returns the raw result for both success and failure responses.
+func SubmitTokenRequest(form url.Values) (*TokenHTTPResult, error) {
+	req, err := http.NewRequest("POST", TestServerURL+"/oauth2/token",
+		bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := GetRawHTTPClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	result := &TokenHTTPResult{
+		StatusCode: resp.StatusCode,
+		Body:       body,
+	}
+	if resp.StatusCode == http.StatusOK {
+		var tokenResponse TokenResponse
+		if err := json.Unmarshal(body, &tokenResponse); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal token response: %w", err)
+		}
+		result.Token = &tokenResponse
+	}
+	return result, nil
 }
 
 // MakeUnsignedDPoPProof builds a header.payload."" JWS where the signature
