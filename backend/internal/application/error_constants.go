@@ -575,4 +575,17 @@ var (
 				"and string-typed in an allowed user type",
 		},
 	}
+	// ErrorInvalidCredential is returned when a supplied credential is invalid.
+	ErrorInvalidCredential = tidcommon.ServiceError{
+		Type: tidcommon.ClientErrorType,
+		Code: "APP-1046",
+		Error: tidcommon.I18nMessage{
+			Key:          "error.applicationservice.invalid_credential",
+			DefaultValue: "Invalid credential",
+		},
+		ErrorDescription: tidcommon.I18nMessage{
+			Key:          "error.applicationservice.invalid_credential_description",
+			DefaultValue: "The provided credential is invalid",
+		},
+	}
 )

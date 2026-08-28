@@ -13,6 +13,7 @@ import (
 
 	"github.com/thunder-id/thunderid/internal/actorprovider"
 	"github.com/thunder-id/thunderid/internal/agent"
+	"github.com/thunder-id/thunderid/internal/agentmgtprovider"
 	"github.com/thunder-id/thunderid/internal/application"
 	"github.com/thunder-id/thunderid/internal/attestation"
 	"github.com/thunder-id/thunderid/internal/attributecache"
@@ -93,6 +94,7 @@ import (
 	"github.com/thunder-id/thunderid/internal/system/sysauthz"
 	"github.com/thunder-id/thunderid/internal/system/template"
 	"github.com/thunder-id/thunderid/internal/user"
+	"github.com/thunder-id/thunderid/internal/usermgtprovider"
 	"github.com/thunder-id/thunderid/internal/vc/credential"
 	"github.com/thunder-id/thunderid/internal/vc/presentation"
 	"github.com/thunder-id/thunderid/pkg/thunderidengine/providers"
@@ -186,6 +188,9 @@ func registerServices(mux *http.ServeMux, cacheManager cache.CacheManagerInterfa
 	)
 	fatalOnError(ctx, logger, err, "Failed to initialize UserService")
 	exporters = append(exporters, userExporter)
+
+	// Initialize user management provider
+	userMgtProvider := usermgtprovider.Initialize(userService)
 
 	groupService, ouGroupResolver, groupExporter, err := group.Initialize(
 		mux, dbprovider.GetDBProvider(), ouService, entityService, entityTypeService, ouAuthzService,
@@ -356,6 +361,7 @@ func registerServices(mux *http.ServeMux, cacheManager cache.CacheManagerInterfa
 			RoleService:           roleService,
 			RoleAssignmentService: roleAssignmentService,
 			EntityProvider:        entityProvider,
+			UserMgtProvider:       userMgtProvider,
 			AttributeCacheSvc:     attributeCacheService,
 			EmailClient:           emailClient,
 			TemplateService:       templateService,
@@ -404,9 +410,8 @@ func registerServices(mux *http.ServeMux, cacheManager cache.CacheManagerInterfa
 	// flow services (which themselves depend on the enforcer) are initialized.
 	consentEnforcer.SetConsentService(initConsentService(ctx, logger, inboundClientService))
 
-	// TODO: Remove entityService dependency after finalizing declarative resource loading pattern
 	applicationService, applicationExporter, err := application.Initialize(
-		mux, mcpServer, entityProvider, entityService, inboundClientService, ouService, i18nService,
+		mux, mcpServer, entityService, inboundClientService, ouService, i18nService,
 		runtimeCryptoSvc, serverConfigService)
 	fatalOnError(ctx, logger, err, "Failed to initialize ApplicationService")
 	exporters = append(exporters, applicationExporter)
@@ -415,6 +420,13 @@ func registerServices(mux *http.ServeMux, cacheManager cache.CacheManagerInterfa
 		roleService)
 	fatalOnError(ctx, logger, err, "Failed to initialize AgentService")
 	exporters = append(exporters, agentExporter)
+
+	// Initialize agent management provider. It has no runtime consumer yet: the provisioning
+	// executor gains its agent branch in a follow-up change, at which point this is handed to the
+	// executor registry. It is constructed here so the package is linked into the server binary and
+	// its integration coverage is reported as uncovered rather than silently dropped.
+	// TODO: pass to the provisioning executor once agent provisioning lands.
+	_ = agentmgtprovider.Initialize(agentService)
 
 	// Wire the dependency registry into the consuming services (two-phase init to avoid cyclic
 	// imports). flowMgtService is both a consumer and a provider: it reports which flows reference an
