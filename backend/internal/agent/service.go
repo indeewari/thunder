@@ -31,7 +31,7 @@ import (
 
 // AgentServiceInterface defines the operations exposed by the agent service.
 type AgentServiceInterface interface {
-	CreateAgent(ctx context.Context, agent *model.Agent) (*model.AgentCompleteResponse,
+	CreateAgent(ctx context.Context, agent *providers.Agent) (*model.AgentCompleteResponse,
 		*tidcommon.ServiceError)
 	GetAgent(ctx context.Context, agentID string, includeDisplay bool) (*model.AgentGetResponse,
 		*tidcommon.ServiceError)
@@ -44,7 +44,7 @@ type AgentServiceInterface interface {
 		*model.AgentGroupListResponse, *tidcommon.ServiceError)
 	GetAgentRoles(ctx context.Context, agentID string, limit, offset int) (
 		*model.AgentRoleListResponse, *tidcommon.ServiceError)
-	ValidateAgent(ctx context.Context, agent *model.Agent, excludeID string) (
+	ValidateAgent(ctx context.Context, agent *providers.Agent, excludeID string) (
 		clientID, clientSecret string, client inboundmodel.InboundClient, svcErr *tidcommon.ServiceError)
 	GetResourceDependencies(
 		ctx context.Context, resourceType, id string) ([]resourcedependency.ResourceDependency, error)
@@ -76,7 +76,7 @@ func newAgentService(
 }
 
 // CreateAgent creates an agent entity with optional inbound auth profile.
-func (s *agentService) CreateAgent(ctx context.Context, agent *model.Agent) (
+func (s *agentService) CreateAgent(ctx context.Context, agent *providers.Agent) (
 	*model.AgentCompleteResponse, *tidcommon.ServiceError) {
 	if agent == nil {
 		return nil, &ErrorInvalidRequestFormat
@@ -618,7 +618,7 @@ func (s *agentService) GetAgentRoles(ctx context.Context, agentID string, limit,
 
 // ValidateAgent validates an Agent without persisting. It resolves OAuth credentials
 // using the entity ID (excludeID) for exclusion, allowing declarative reload of an existing agent.
-func (s *agentService) ValidateAgent(ctx context.Context, agent *model.Agent, excludeID string) (
+func (s *agentService) ValidateAgent(ctx context.Context, agent *providers.Agent, excludeID string) (
 	string, string, inboundmodel.InboundClient, *tidcommon.ServiceError) {
 	if agent == nil {
 		return "", "", inboundmodel.InboundClient{}, &ErrorInvalidRequestFormat
@@ -898,7 +898,7 @@ func (s *agentService) isClientIDTaken(
 
 // createInboundForAgent creates the inbound client row; applies server defaults via CreateInboundClient.
 func (s *agentService) createInboundForAgent(ctx context.Context, agentID string,
-	agent *model.Agent, clientSecret string) (
+	agent *providers.Agent, clientSecret string) (
 	inboundmodel.InboundClient, *providers.OAuthProfile, *tidcommon.ServiceError) {
 	client := buildInboundClientRecord(agentID, agent.AuthFlowID, agent.RegistrationFlowID,
 		agent.IsRegistrationFlowEnabled, agent.ThemeID, agent.LayoutID, agent.Assertion,
@@ -1158,7 +1158,7 @@ func (s *agentService) populateOUHandlesForList(ctx context.Context, agents []mo
 }
 
 // needsInboundClient reports whether any inbound auth field in the create request requires an inbound client row.
-func needsInboundClient(agent *model.Agent) bool {
+func needsInboundClient(agent *providers.Agent) bool {
 	if agent == nil {
 		return false
 	}

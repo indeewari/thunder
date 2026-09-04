@@ -76,7 +76,7 @@ func (h *agentHandler) HandleAgentPostRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	agent := &model.Agent{
+	agent := &providers.Agent{
 		OUID:        req.OUID,
 		OUHandle:    req.OUHandle,
 		Type:        req.Type,

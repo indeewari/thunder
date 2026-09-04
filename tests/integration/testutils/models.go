@@ -28,7 +28,9 @@ type UserTypeSystemAttributes struct {
 type User struct {
 	ID         string          `json:"id"`
 	OUID       string          `json:"ouId"`
+	OUHandle   string          `json:"ouHandle,omitempty"`
 	Type       string          `json:"type"`
+	Display    string          `json:"display,omitempty"`
 	Attributes json.RawMessage `json:"attributes"`
 }
 
