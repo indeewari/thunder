@@ -2677,8 +2677,13 @@
         },
         {
           "type": "doc",
-          "id": "community/contributing/contribute-ideas",
-          "label": "Contribute Ideas"
+          "id": "community/contributing/propose-a-feature",
+          "label": "Propose a Feature"
+        },
+        {
+          "type": "doc",
+          "id": "community/contributing/propose-a-design",
+          "label": "Propose a Design"
         },
         {
           "type": "category",
