@@ -10,11 +10,13 @@ import (
 	"strings"
 
 	"github.com/thunder-id/thunderid/internal/system/outboundauth"
+	"github.com/thunder-id/thunderid/internal/system/outboundauth/httpauth"
 )
 
-// SupportedAuthTypes returns the outbound authentication methods an HTTP connection accepts.
+// SupportedAuthTypes returns the outbound authentication methods an HTTP connection accepts: those
+// the HTTP transport can present, so a connection that validates can always be called.
 func SupportedAuthTypes() []outboundauth.Type {
-	return []outboundauth.Type{outboundauth.TypeNone, outboundauth.TypeBasic}
+	return httpauth.SupportedTypes()
 }
 
 // SameOrigin reports whether two URLs share scheme, host and port, with default ports normalized.

@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/thunder-id/thunderid/internal/system/outboundauth/httpauth"
 )
 
 type UtilsTestSuite struct {
@@ -15,6 +17,10 @@ type UtilsTestSuite struct {
 
 func TestUtilsTestSuite(t *testing.T) {
 	suite.Run(t, new(UtilsTestSuite))
+}
+
+func (s *UtilsTestSuite) TestSupportedAuthTypesAreTheOnesHTTPCanPresent() {
+	s.Equal(httpauth.SupportedTypes(), SupportedAuthTypes())
 }
 
 func (s *UtilsTestSuite) TestSameOrigin() {
