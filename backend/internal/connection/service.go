@@ -14,6 +14,7 @@ import (
 	"github.com/thunder-id/thunderid/internal/notification"
 	ncommon "github.com/thunder-id/thunderid/internal/notification/common"
 	"github.com/thunder-id/thunderid/internal/resource"
+	"github.com/thunder-id/thunderid/internal/system/cmodels"
 	serverconst "github.com/thunder-id/thunderid/internal/system/constants"
 	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
 	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
@@ -435,7 +436,11 @@ func (s *service) createHTTP(ctx context.Context, connection httpconnection.HTTP
 	if s.httpService == nil {
 		return nil, &tidcommon.InternalServerError
 	}
-	return s.httpService.CreateHTTPConnection(ctx, connection)
+	created, svcErr := s.httpService.CreateHTTPConnection(ctx, connection)
+	if svcErr == nil {
+		s.captureHTTPValues(ctx, created)
+	}
+	return created, svcErr
 }
 
 // listHTTP returns all HTTP connections.
@@ -456,19 +461,29 @@ func (s *service) getHTTP(ctx context.Context, id string) (*httpconnection.HTTPC
 }
 
 // updateHTTP preserves any secret the request omits while its credential target is unchanged, then
-// delegates the update. The credential target of an HTTP connection is its URL origin, so pointing
-// a connection at another server needs the secret again.
+// delegates the update.
 func (s *service) updateHTTP(ctx context.Context, id string, connection httpconnection.HTTPConnection) (
 	*httpconnection.HTTPConnection, *tidcommon.ServiceError) {
 	existing, svcErr := s.getHTTP(ctx, id)
 	if svcErr != nil {
 		return nil, svcErr
 	}
-	targetUnchanged := credentialTargetUnchanged(connection.AuthProperties, existing.AuthProperties, nil) &&
-		httpconnection.SameOrigin(connection.URL, existing.URL)
-	connection.AuthProperties = keepStoredSecrets(connection.AuthProperties, existing.AuthProperties,
-		targetUnchanged)
-	return s.httpService.UpdateHTTPConnection(ctx, id, connection)
+	connection.AuthProperties = KeepStoredHTTPSecrets(connection, *existing)
+	updated, svcErr := s.httpService.UpdateHTTPConnection(ctx, id, connection)
+	if svcErr == nil {
+		s.captureHTTPValues(ctx, updated)
+	}
+	return updated, svcErr
+}
+
+// KeepStoredHTTPSecrets returns the authentication properties of an update to an HTTP connection,
+// with each stored secret the update omits carried over while the credential target is unchanged:
+// the authentication type, the username and the URL origin. Pointing a connection at another server
+// needs the secret again.
+func KeepStoredHTTPSecrets(update, existing httpconnection.HTTPConnection) []cmodels.Property {
+	targetUnchanged := credentialTargetUnchanged(update.AuthProperties, existing.AuthProperties, nil) &&
+		httpconnection.SameOrigin(update.URL, existing.URL)
+	return keepStoredSecrets(update.AuthProperties, existing.AuthProperties, targetUnchanged)
 }
 
 // deleteHTTP deletes an HTTP connection by ID.

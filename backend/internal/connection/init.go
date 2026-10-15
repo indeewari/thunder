@@ -39,7 +39,7 @@ func Initialize(mux *http.ServeMux, idpService idp.IDPServiceInterface,
 		return nil, err
 	}
 
-	return newConnectionExporter(idpService, notificationService, authZENPDPService), nil
+	return newConnectionExporter(idpService, notificationService, authZENPDPService, httpService), nil
 }
 
 func noContent(w http.ResponseWriter, _ *http.Request) {

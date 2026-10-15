@@ -4,13 +4,21 @@
 package httpconnection
 
 import (
+	"context"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/thunder-id/thunderid/internal/system/log"
 	"github.com/thunder-id/thunderid/internal/system/outboundauth"
+	tidcommon "github.com/thunder-id/thunderid/pkg/thunderidengine/common"
 )
+
+// ValidateHTTPConnection runs the checks create and update run, normalizing the connection in place.
+func ValidateHTTPConnection(connection *HTTPConnection) *tidcommon.ServiceError {
+	return validateHTTPConnection(context.Background(), connection, log.GetLogger())
+}
 
 // SupportedAuthTypes returns the outbound authentication methods an HTTP connection accepts.
 func SupportedAuthTypes() []outboundauth.Type {

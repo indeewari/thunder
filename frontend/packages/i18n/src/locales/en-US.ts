@@ -2263,6 +2263,7 @@ const translations = {
     'errors.CON-1019':
       'The authentication settings are not valid. Check the method and enter every required credential. After changing the URL origin, enter the password again.',
     'errors.CON-1020': 'Enter a description of at most 500 characters.',
+    'errors.CON-1022': 'There are too many HTTP endpoint connections to list. Remove some and try again.',
     'errors.IDP-1001': 'This identity provider no longer exists. It may have already been deleted.',
     'errors.IDP-1002': 'The identity provider ID is invalid or missing.',
     'errors.IDP-1003': 'The identity provider name is invalid or missing.',

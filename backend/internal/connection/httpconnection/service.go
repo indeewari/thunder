@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/net/http/httpguts"
 
+	serverconst "github.com/thunder-id/thunderid/internal/system/constants"
 	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
 	"github.com/thunder-id/thunderid/internal/system/log"
 	"github.com/thunder-id/thunderid/internal/system/outboundauth"
@@ -34,17 +35,20 @@ type HTTPConnectionServiceInterface interface {
 
 // httpConnectionService validates and manages HTTP connections.
 type httpConnectionService struct {
-	store  httpConnectionStoreInterface
-	logger *log.Logger
+	store     httpConnectionStoreInterface
+	storeMode serverconst.StoreMode
+	logger    *log.Logger
 }
 
 var _ HTTPConnectionServiceInterface = (*httpConnectionService)(nil)
 
 // newHTTPConnectionService creates an HTTP connection service.
-func newHTTPConnectionService(store httpConnectionStoreInterface) *httpConnectionService {
+func newHTTPConnectionService(store httpConnectionStoreInterface,
+	storeMode serverconst.StoreMode) *httpConnectionService {
 	return &httpConnectionService{
-		store:  store,
-		logger: log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName)),
+		store:     store,
+		storeMode: storeMode,
+		logger:    log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName)),
 	}
 }
 
@@ -54,19 +58,28 @@ func (s *httpConnectionService) CreateHTTPConnection(ctx context.Context, connec
 	if svcErr := declarativeresource.CheckDeclarativeCreate(); svcErr != nil {
 		return nil, svcErr
 	}
-	if svcErr := s.validate(ctx, &connection); svcErr != nil {
+	// http_connection.store can make the store declarative while the server's declarative mode is off.
+	if s.storeMode == serverconst.StoreModeDeclarative {
+		return nil, &declarativeresource.ErrorDeclarativeResourceCreateOperation
+	}
+	if svcErr := validateHTTPConnection(ctx, &connection, s.logger); svcErr != nil {
 		return nil, svcErr
 	}
-	id, err := sysutils.GenerateUUIDv7()
-	if err != nil {
-		s.logger.Error(ctx, "Failed to generate HTTP connection ID", log.Error(err))
-		return nil, &tidcommon.InternalServerError
+	if connection.ID == "" {
+		id, err := sysutils.GenerateUUIDv7()
+		if err != nil {
+			s.logger.Error(ctx, "Failed to generate HTTP connection ID", log.Error(err))
+			return nil, &tidcommon.InternalServerError
+		}
+		connection.ID = id
 	}
-	connection.ID = id
 
 	if err := s.store.CreateHTTPConnection(ctx, connection); err != nil {
-		if errors.Is(err, errNameConflict) {
+		switch {
+		case errors.Is(err, errNameConflict), errors.Is(err, errIDConflict):
 			return nil, &ErrorAlreadyExists
+		case errors.Is(err, errHTTPConnectionIsImmutable):
+			return nil, &declarativeresource.ErrorDeclarativeResourceCreateOperation
 		}
 		s.logger.Error(ctx, "Failed to create HTTP connection",
 			log.Error(err), log.String("connectionName", connection.Name))
@@ -80,6 +93,9 @@ func (s *httpConnectionService) ListHTTPConnections(ctx context.Context) ([]HTTP
 	*tidcommon.ServiceError) {
 	connections, err := s.store.ListHTTPConnections(ctx)
 	if err != nil {
+		if errors.Is(err, errResultLimitExceededInCompositeMode) {
+			return nil, &ErrorResultLimitExceededInCompositeMode
+		}
 		s.logger.Error(ctx, "Failed to list HTTP connections", log.Error(err))
 		return nil, &tidcommon.InternalServerError
 	}
@@ -109,7 +125,7 @@ func (s *httpConnectionService) UpdateHTTPConnection(ctx context.Context, id str
 	if svcErr := declarativeresource.CheckDeclarativeUpdate(); svcErr != nil {
 		return nil, svcErr
 	}
-	if svcErr := s.validate(ctx, &connection); svcErr != nil {
+	if svcErr := validateHTTPConnection(ctx, &connection, s.logger); svcErr != nil {
 		return nil, svcErr
 	}
 	connection.ID = id
@@ -120,6 +136,8 @@ func (s *httpConnectionService) UpdateHTTPConnection(ctx context.Context, id str
 			return nil, &ErrorAlreadyExists
 		case errors.Is(err, errConnectionNotFound):
 			return nil, &ErrorNotFound
+		case errors.Is(err, errHTTPConnectionIsImmutable):
+			return nil, &declarativeresource.ErrorDeclarativeResourceUpdateOperation
 		}
 		s.logger.Error(ctx, "Failed to update HTTP connection", log.Error(err), log.String("connectionID", id))
 		return nil, &tidcommon.InternalServerError
@@ -136,8 +154,11 @@ func (s *httpConnectionService) DeleteHTTPConnection(ctx context.Context, id str
 		return &ErrorNotFound
 	}
 	if err := s.store.DeleteHTTPConnection(ctx, id); err != nil {
-		if errors.Is(err, errConnectionNotFound) {
+		switch {
+		case errors.Is(err, errConnectionNotFound):
 			return &ErrorNotFound
+		case errors.Is(err, errHTTPConnectionIsImmutable):
+			return &declarativeresource.ErrorDeclarativeResourceDeleteOperation
 		}
 		s.logger.Error(ctx, "Failed to delete HTTP connection", log.Error(err), log.String("connectionID", id))
 		return &tidcommon.InternalServerError
@@ -145,8 +166,9 @@ func (s *httpConnectionService) DeleteHTTPConnection(ctx context.Context, id str
 	return nil
 }
 
-// validate checks a connection and normalizes it in place for storage.
-func (s *httpConnectionService) validate(ctx context.Context, connection *HTTPConnection) *tidcommon.ServiceError {
+// validateHTTPConnection checks a connection and normalizes it in place for storage.
+func validateHTTPConnection(ctx context.Context, connection *HTTPConnection,
+	logger *log.Logger) *tidcommon.ServiceError {
 	connection.Name = strings.TrimSpace(connection.Name)
 	if connection.Name == "" || utf8.RuneCountInString(connection.Name) > maxNameLength {
 		return &ErrorInvalidName
@@ -165,14 +187,14 @@ func (s *httpConnectionService) validate(ctx context.Context, connection *HTTPCo
 	if connection.TimeoutMS < 1 || connection.TimeoutMS > maxTimeoutMS {
 		return &ErrorInvalidTimeout
 	}
-	if svcErr := s.validateHeaders(connection); svcErr != nil {
+	if svcErr := validateHeaders(connection); svcErr != nil {
 		return svcErr
 	}
-	return s.validateAuthentication(ctx, connection, endpoint)
+	return validateAuthentication(ctx, connection, endpoint, logger)
 }
 
 // validateHeaders trims plain headers and checks that each is valid, not repeated and not reserved.
-func (s *httpConnectionService) validateHeaders(connection *HTTPConnection) *tidcommon.ServiceError {
+func validateHeaders(connection *HTTPConnection) *tidcommon.ServiceError {
 	headers := make([]Header, 0, len(connection.Headers))
 	seen := make(map[string]bool, len(connection.Headers))
 	for _, header := range connection.Headers {
@@ -190,11 +212,11 @@ func (s *httpConnectionService) validateHeaders(connection *HTTPConnection) *tid
 }
 
 // validateAuthentication checks the connection's outbound authentication against its method.
-func (s *httpConnectionService) validateAuthentication(ctx context.Context, connection *HTTPConnection,
-	endpoint *url.URL) *tidcommon.ServiceError {
+func validateAuthentication(ctx context.Context, connection *HTTPConnection, endpoint *url.URL,
+	logger *log.Logger) *tidcommon.ServiceError {
 	authConfig, err := outboundauth.FromProperties(connection.AuthProperties)
 	if err != nil {
-		s.logger.Error(ctx, "Failed to read HTTP connection authentication", log.Error(err))
+		logger.Error(ctx, "Failed to read HTTP connection authentication", log.Error(err))
 		return &tidcommon.InternalServerError
 	}
 	if err := outboundauth.Validate(authConfig, SupportedAuthTypes()); err != nil {

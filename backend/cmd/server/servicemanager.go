@@ -223,7 +223,8 @@ func registerServices(mux *http.ServeMux, cacheManager cache.CacheManagerInterfa
 	authZENPDPService, err := authzenpdp.Initialize(runtime.Config.AuthZENPDP, entityTypeService)
 	fatalOnError(ctx, logger, err, "Failed to initialize AuthZENPDPService")
 
-	httpConnectionService := httpconnection.Initialize()
+	httpConnectionService, err := httpconnection.Initialize(runtime.Config.HTTPConnection)
+	fatalOnError(ctx, logger, err, "Failed to initialize HTTPConnectionService")
 
 	resourceService, resourceExporter, err := resource.Initialize(mux, ouService, authZENPDPService, nil)
 	fatalOnError(ctx, logger, err, "Failed to initialize Resource Service")
@@ -549,6 +550,7 @@ func registerServices(mux *http.ServeMux, cacheManager cache.CacheManagerInterfa
 		notifTemplateSvc,
 		authZENPDPService,
 		sharingService,
+		httpConnectionService,
 		// References in imported configuration are replaced with what this deployment's store holds.
 		secretresolver.New(variablestore.Lookup(references)),
 	)

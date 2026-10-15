@@ -43,7 +43,7 @@ const (
 	httpConnBasicPassword2 = "http-conn-api-basic-secret-rotated"
 )
 
-var httpConnSecrets = []string{httpConnBasicPassword, httpConnBasicPassword2}
+var httpConnSecrets = []string{httpConnBasicPassword, httpConnBasicPassword2, httpConnDeclarativePassword}
 
 type httpConnHeader struct {
 	Name  string `json:"name"`
