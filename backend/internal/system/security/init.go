@@ -16,8 +16,11 @@ import (
 // managementAPIKeyHash, when configured, admits a second mechanism for the import and variable
 // store APIs only. It is registered ahead of the JWT authenticator because it claims a request only
 // when the API-Key header hashes to that digest; anything else falls through to JWT unchanged.
+//
+// onRejection, when not nil, is told about every mutating request the middleware refuses on a path
+// that is not public. Nil leaves the middleware as it would be without it.
 func Initialize(jwtService jwt.JWTServiceInterface, revocationEnforcer RevocationEnforcerInterface,
-	expectedAud string, managementAPIKeyHash string,
+	expectedAud string, managementAPIKeyHash string, onRejection RejectionHook,
 ) (func(http.Handler) http.Handler, error) {
 	authenticators := make([]AuthenticatorInterface, 0, 2)
 
@@ -36,5 +39,6 @@ func Initialize(jwtService jwt.JWTServiceInterface, revocationEnforcer Revocatio
 	if err != nil {
 		return nil, err
 	}
+	securityService.onRejection = onRejection
 	return middleware(securityService)
 }

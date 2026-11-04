@@ -18,12 +18,15 @@ type DeliveryMode string
 type Envelope struct {
 	// ID is unique per event, a UUID v7 so that IDs sort by time.
 	ID string
-	// Name identifies what happened, for example user.created.
+	// Name identifies the action attempted, for example user.create.
 	Name string
 	// Time is when the event was published, in UTC to the microsecond.
 	Time time.Time
 	// TraceID is the correlation ID of the request. A caller can supply it, so it is not trusted.
 	TraceID string
+	// TraceParent is the W3C trace context of the request, empty when it carried no valid one. A caller
+	// supplies it, so it is not trusted.
+	TraceParent string
 	// DeploymentID is the deployment the event belongs to.
 	DeploymentID string
 	// Source names the binary that published the event.

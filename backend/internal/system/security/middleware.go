@@ -47,7 +47,7 @@ func writeSecurityError(ctx context.Context, w http.ResponseWriter, err error) {
 	// A 403 is an authorization failure: the caller authenticated successfully but lacks the required
 	// permission. It is not an authentication challenge, so no WWW-Authenticate header is emitted.
 	// (A future change may add the RFC 6750 insufficient_scope challenge here.)
-	if errors.Is(err, errForbidden) || errors.Is(err, errInsufficientPermissions) {
+	if refusalStatus(err) == http.StatusForbidden {
 		utils.WriteErrorResponse(ctx, w, http.StatusForbidden, apierror.ErrForbidden)
 		return
 	}
@@ -61,4 +61,13 @@ func writeSecurityError(ctx context.Context, w http.ResponseWriter, err error) {
 	}
 
 	utils.WriteErrorResponse(ctx, w, http.StatusUnauthorized, apierror.ErrUnauthorized)
+}
+
+// refusalStatus returns the status a security error is answered with: 403 for an authorization
+// failure, 401 for every other refusal.
+func refusalStatus(err error) int {
+	if errors.Is(err, errForbidden) || errors.Is(err, errInsufficientPermissions) {
+		return http.StatusForbidden
+	}
+	return http.StatusUnauthorized
 }

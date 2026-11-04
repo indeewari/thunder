@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -21,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +35,12 @@ import (
 	"github.com/thunder-id/thunderid/internal/system/config"
 	"github.com/thunder-id/thunderid/internal/system/constants"
 	sysContext "github.com/thunder-id/thunderid/internal/system/context"
+	"github.com/thunder-id/thunderid/internal/system/cryptolib"
+	"github.com/thunder-id/thunderid/internal/system/eventbus"
+	"github.com/thunder-id/thunderid/internal/system/eventbus/defaultaudit"
 	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/revocationcache"
+	"github.com/thunder-id/thunderid/internal/system/security"
 	"github.com/thunder-id/thunderid/tests/mocks/jose/jwtmock"
 )
 
@@ -61,9 +68,12 @@ func (suite *CreateSecurityMiddlewareTestSuite) TestCreateSecurityMiddleware_Mul
 	cfg := &config.Config{}
 
 	// Execute multiple times
-	handler1 := createSecurityMiddleware(context.Background(), suite.logger, cfg, suite.mux, suite.mockJWTService, nil)
-	handler2 := createSecurityMiddleware(context.Background(), suite.logger, cfg, suite.mux, suite.mockJWTService, nil)
-	handler3 := createSecurityMiddleware(context.Background(), suite.logger, cfg, suite.mux, suite.mockJWTService, nil)
+	handler1 := createSecurityMiddleware(context.Background(), suite.logger, cfg, suite.mux, suite.mockJWTService, nil,
+		nil)
+	handler2 := createSecurityMiddleware(context.Background(), suite.logger, cfg, suite.mux, suite.mockJWTService, nil,
+		nil)
+	handler3 := createSecurityMiddleware(context.Background(), suite.logger, cfg, suite.mux, suite.mockJWTService, nil,
+		nil)
 
 	// Assert - each call should return a new handler instance
 	assert.NotNil(suite.T(), handler1)
@@ -84,7 +94,7 @@ func TestCreateHTTPServer_WithHTTPOnly(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	server := createHTTPServer(context.Background(), logger, cfg, mux, nil, nil)
+	server := createHTTPServer(context.Background(), logger, cfg, mux, nil, nil, newTestAuditBus(t))
 
 	assert.Equal(t, "localhost:0", server.Addr)
 	assert.NotNil(t, server.Handler)
@@ -99,7 +109,8 @@ func TestCreateHTTPServer_WithHTTPOnly(t *testing.T) {
 func TestCreateHTTPServer_UnsetTimeoutsFallBackToTheShippedOnes(t *testing.T) {
 	cfg := &config.Config{Server: engineconfig.ServerConfig{Hostname: "localhost", HTTPOnly: true}}
 
-	server := createHTTPServer(context.Background(), log.GetLogger(), cfg, http.NewServeMux(), nil, nil)
+	server := createHTTPServer(context.Background(), log.GetLogger(), cfg, http.NewServeMux(), nil, nil,
+		newTestAuditBus(t))
 
 	assert.Equal(t, 10*time.Second, server.ReadHeaderTimeout)
 	assert.Equal(t, 10*time.Second, server.WriteTimeout)
@@ -706,4 +717,131 @@ func TestAccessLogExcludePaths(t *testing.T) {
 	// and silently disable all access logging.
 	assert.Equal(t, []string{"/gate/", "/console/", "/health/"},
 		accessLogExcludePaths([]string{"", "/health/", "/"}))
+}
+
+// testAuditAPIKey is the management API key the audit tests present.
+const testAuditAPIKey = "pat-0123456789abcdef"
+
+// newTestAuditBus builds the audit bus the way the binary does, with audit off.
+func newTestAuditBus(t *testing.T) eventbus.EventBusInterface {
+	t.Helper()
+	bus, stopper, err := defaultaudit.Initialize(defaultaudit.Config{
+		Source:  auditSource,
+		LogType: config.LogTypeConfig{Key: "log_type", Audit: "AUDIT"},
+	})
+	require.NoError(t, err)
+	t.Cleanup(stopper.Stop)
+	return bus
+}
+
+// captureStdout sends standard output to a pipe until the returned function is called, which returns
+// the audit lines written to it.
+func captureStdout(t *testing.T) func() []string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	original := os.Stdout
+	os.Stdout = writer
+	t.Cleanup(func() { os.Stdout = original })
+	return func() []string {
+		os.Stdout = original
+		require.NoError(t, writer.Close())
+		written, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		var lines []string
+		for _, line := range strings.Split(string(written), "\n") {
+			if strings.HasPrefix(line, `{"log_type":"AUDIT",`) {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+}
+
+// A management call through the whole request chain, with the shipped audit configuration, writes one
+// audit line that names the actor the security layer verified, the route the mux matched, the peer
+// address and the trace ID of the response, and a call the security layer refuses writes the event of
+// its route with a denied outcome.
+func TestCreateHTTPServer_AuditsAManagementCall(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Server: engineconfig.ServerConfig{
+			Hostname:   "localhost",
+			HTTPOnly:   true,
+			Identifier: "audit-deployment",
+			SecurityConfig: engineconfig.SecurityConfig{
+				ManagementAPIKeyHash: cryptolib.HashToken(testAuditAPIKey),
+			},
+		},
+		Audit: config.AuditConfig{Enabled: &enabled, Delivery: "best_effort", QueueSize: 1024,
+			DeliveryTimeoutSeconds: 5},
+		Log: config.LogConfig{Type: config.LogTypeConfig{Key: "log_type", Audit: "AUDIT"}},
+	}
+	config.ResetServerRuntime()
+	require.NoError(t, config.InitializeServerRuntime("", cfg))
+	t.Cleanup(config.ResetServerRuntime)
+	security.InitSystemPermissions("")
+	enforcer, _, err := revocationcache.Initialize(revocationcache.Config{})
+	require.NoError(t, err)
+
+	read := captureStdout(t)
+	bus, stopper := initAuditBus(context.Background(), log.GetLogger(), cfg)
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /variables/{name}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	server := createHTTPServer(context.Background(), log.GetLogger(), cfg, mux, nil, enforcer, bus)
+
+	request := httptest.NewRequest(http.MethodPut, "/variables/API_URL", nil)
+	request.RemoteAddr = "192.0.2.10:52814"
+	request.Header.Set(constants.APIKeyHeaderName, testAuditAPIKey)
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, request)
+	refused := httptest.NewRecorder()
+	server.Handler.ServeHTTP(refused, httptest.NewRequest(http.MethodDelete, "/variables/API_URL", nil))
+	stopper.Stop()
+
+	require.Equal(t, http.StatusNoContent, response.Code)
+	require.Equal(t, http.StatusUnauthorized, refused.Code)
+	lines := read()
+	require.Len(t, lines, 2)
+	type auditLine struct {
+		Event        string            `json:"event"`
+		Source       string            `json:"source"`
+		DeploymentID string            `json:"deployment_id"`
+		TraceID      string            `json:"trace_id"`
+		Actor        map[string]string `json:"actor"`
+		Target       map[string]string `json:"target"`
+		Outcome      map[string]string `json:"outcome"`
+		Client       map[string]string `json:"client"`
+	}
+	var line, denied auditLine
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &line))
+	assert.Equal(t, "variable.update", line.Event)
+	assert.Equal(t, "server", line.Source)
+	assert.Equal(t, "audit-deployment", line.DeploymentID)
+	assert.Equal(t, response.Header().Get(constants.CorrelationIDHeaderName), line.TraceID)
+	assert.Equal(t, map[string]string{"type": "system", "id": "management-api-key"}, line.Actor)
+	assert.Equal(t, map[string]string{"type": "variable", "id": "API_URL"}, line.Target)
+	assert.Equal(t, map[string]string{"result": "succeeded"}, line.Outcome)
+	assert.Equal(t, "192.0.2.10", line.Client["address"])
+
+	// The refused call never reached the routes, so the security layer reported it.
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &denied))
+	assert.Equal(t, "variable.delete", denied.Event)
+	assert.Equal(t, refused.Header().Get(constants.CorrelationIDHeaderName), denied.TraceID)
+	assert.Equal(t, map[string]string{"type": "anonymous"}, denied.Actor)
+	assert.Equal(t, map[string]string{"type": "variable"}, denied.Target)
+	assert.Equal(t, map[string]string{"result": "denied", "reason": "unauthorized"}, denied.Outcome)
+}
+
+func TestInitAuditBus_ExitsOnAnInvalidMarker(t *testing.T) {
+	const helperEnv = "TEST_INIT_AUDIT_BUS_EXIT"
+	if os.Getenv(helperEnv) == "1" {
+		cfg := &config.Config{Log: config.LogConfig{Type: config.LogTypeConfig{Key: "log type", Audit: "AUDIT"}}}
+		initAuditBus(context.Background(), log.GetLogger(), cfg)
+		return
+	}
+
+	runExitHelper(t, helperEnv, "TestInitAuditBus_ExitsOnAnInvalidMarker")
 }

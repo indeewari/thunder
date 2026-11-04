@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thunder-id/thunderid/internal/system/log"
+	"github.com/thunder-id/thunderid/internal/system/utils"
 )
 
 const loggerComponentName = "SecurityService"
@@ -37,6 +38,12 @@ type RevocationEnforcerInterface interface {
 	EnsureNotRevoked(ctx context.Context, identity RevocationIdentity) error
 }
 
+// RejectionHook is told about a mutating request the security layer refused on a path that is not
+// public, with the status of the refusal. ctx carries the verified security context only for a 403,
+// when the caller authenticated and lacked permission. The hook must not block, and cannot change the
+// response.
+type RejectionHook func(ctx context.Context, r *http.Request, status int)
+
 // securityService orchestrates authentication and authorization for HTTP requests.
 type securityService struct {
 	authenticators         []AuthenticatorInterface
@@ -44,6 +51,8 @@ type securityService struct {
 	logger                 *log.Logger
 	compiledPaths          []*regexp.Regexp
 	compiledAPIPermissions []compiledAPIPermission
+	// onRejection, when set, is told about each refused mutating request.
+	onRejection RejectionHook
 }
 
 // newSecurityService creates a new instance of the security service.
@@ -101,13 +110,13 @@ func (s *securityService) Process(r *http.Request) (context.Context, error) {
 
 	// If no authenticator found
 	if authenticator == nil {
-		return s.handleAuthError(r.Context(), isPublic, errNoHandlerFound)
+		return s.handleAuthError(r.Context(), r, isPublic, errNoHandlerFound)
 	}
 
 	// Authenticate the request
 	securityCtx, err := authenticator.Authenticate(r)
 	if err != nil {
-		return s.handleAuthError(r.Context(), isPublic, err)
+		return s.handleAuthError(r.Context(), r, isPublic, err)
 	}
 
 	// Add authentication context to request context if available
@@ -120,13 +129,13 @@ func (s *securityService) Process(r *http.Request) (context.Context, error) {
 		// carries. A revoked token is surfaced as an invalid token (RFC 6750 §3.1) so the response does
 		// not disclose that the token was specifically revoked.
 		if err := s.revocationEnforcer.EnsureNotRevoked(ctx, securityCtx.revocationIdentity()); err != nil {
-			return s.handleAuthError(ctx, isPublic, errInvalidToken)
+			return s.handleAuthError(ctx, r, isPublic, errInvalidToken)
 		}
 	}
 
 	// Authorize the authenticated principal based on the permissions carried in the security context.
 	if err := s.authorize(r.WithContext(ctx)); err != nil {
-		return s.handleAuthError(ctx, isPublic, err)
+		return s.handleAuthError(ctx, r, isPublic, err)
 	}
 
 	return ctx, nil
@@ -196,9 +205,10 @@ func (s *securityService) isPublicPath(ctx context.Context, requestPath string) 
 }
 
 // handleAuthError grants access to public paths (as an internal runtime caller)
-// and otherwise propagates the authentication/authorization error.
+// and otherwise reports the refusal and propagates the authentication/authorization error.
 func (s *securityService) handleAuthError(
 	ctx context.Context,
+	r *http.Request,
 	isPublic bool,
 	err error,
 ) (context.Context, error) {
@@ -207,5 +217,20 @@ func (s *securityService) handleAuthError(
 		return WithRuntimeContext(ctx), nil
 	}
 
+	s.reportRejection(ctx, r, err)
 	return nil, err
+}
+
+// reportRejection tells the rejection hook about a refused mutating request. A 401 is reported with
+// the request's own context, so the hook never sees a subject the layer did not accept, such as the
+// subject of a revoked token.
+func (s *securityService) reportRejection(ctx context.Context, r *http.Request, err error) {
+	if s.onRejection == nil || !utils.IsMutatingMethod(r.Method) {
+		return
+	}
+	status := refusalStatus(err)
+	if status == http.StatusUnauthorized {
+		ctx = r.Context()
+	}
+	s.onRejection(ctx, r, status)
 }

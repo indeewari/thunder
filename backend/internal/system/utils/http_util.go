@@ -619,6 +619,16 @@ func FilterSensitiveQueryParams(params map[string][]string) map[string][]string 
 	return filtered
 }
 
+// IsMutatingMethod reports whether an HTTP method changes state: POST, PUT, PATCH or DELETE.
+func IsMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsBearerAuth checks if the Authorization header uses the Bearer scheme (case-insensitive).
 func IsBearerAuth(authHeader string) bool {
 	parts := strings.SplitN(authHeader, " ", 2)

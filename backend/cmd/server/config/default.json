@@ -289,7 +289,18 @@
     },
     "access": {
       "exclude_paths": []
+    },
+    "type": {
+      "key": "log_type",
+      "audit": "AUDIT"
     }
+  },
+  "audit": {
+    "enabled": true,
+    "delivery": "best_effort",
+    "queue_size": 1024,
+    "delivery_timeout_seconds": 5,
+    "instance_id": ""
   },
   "observability": {
     "enabled": false,

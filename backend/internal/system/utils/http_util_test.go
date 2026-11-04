@@ -1503,3 +1503,12 @@ func (suite *HTTPUtilTestSuite) TestExtendWriteDeadline() {
 	_, err = get(slow(0))
 	suite.Error(err, "a route that keeps the server's timeout should lose its connection")
 }
+
+func (suite *HTTPUtilTestSuite) TestIsMutatingMethod() {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		suite.True(IsMutatingMethod(method), method)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, ""} {
+		suite.False(IsMutatingMethod(method), method)
+	}
+}

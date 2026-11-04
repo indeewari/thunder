@@ -693,6 +693,21 @@ configuration:
     # access:
     #   excludePaths:
     #     - /health
+    # Optional. The marker that starts every audit line, so a collector can route audit lines by it.
+    # Diagnostic lines carry no marker.
+    # type:
+    #   key: "log_type"
+    #   audit: "AUDIT"
+
+  # Audit events. Each is written to stdout as one JSON line that starts with the log.type marker,
+  # whatever the log level or format. Omitted keys keep the server defaults shown here.
+  # audit:
+  #   enabled: true
+  #   delivery: "best_effort"
+  #   queueSize: 1024
+  #   deliveryTimeoutSeconds: 5
+  #   # Identifies this pod in audit lines. Empty uses the host name.
+  #   instanceId: ""
 
   # Storage mode per resource type: "mutable", "declarative", or "composite".
   # Only set these when declarativeResources.enabled=true and the resource should be

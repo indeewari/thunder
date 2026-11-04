@@ -14,6 +14,9 @@ import (
 	"github.com/thunder-id/thunderid/internal/system/deployment"
 )
 
+// validTraceParent is a W3C version 00 traceparent.
+const validTraceParent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
 type EventTestSuite struct {
 	suite.Suite
 }
@@ -89,6 +92,30 @@ func (s *EventTestSuite) TestTraceIDIsEmptyWhenTheContextHasNone() {
 	evt := NewEvent(context.Background(), testEventName).With(payloadOne{})
 
 	s.Empty(evt.envelope.TraceID)
+}
+
+func (s *EventTestSuite) TestAValidTraceParentIsCarried() {
+	evt := NewEvent(WithTraceParent(context.Background(), validTraceParent), testEventName).With(payloadOne{})
+
+	s.Equal(validTraceParent, evt.envelope.TraceParent)
+}
+
+func (s *EventTestSuite) TestAnInvalidTraceParentIsIgnoredAndNoneIsGenerated() {
+	for _, value := range []string{
+		"",
+		"garbage",
+		"01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		"00-0AF7651916CD43DD8448EB211C80319C-b7ad6b7169203331-01",
+		validTraceParent + " ",
+		"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331",
+		"00-00000000000000000000000000000000-b7ad6b7169203331-01",
+		"00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01",
+	} {
+		evt := NewEvent(WithTraceParent(context.Background(), value), testEventName).With(payloadOne{})
+
+		s.Empty(evt.envelope.TraceParent, value)
+	}
+	s.Empty(NewEvent(context.Background(), testEventName).envelope.TraceParent, "none is generated")
 }
 
 func (s *EventTestSuite) TestPointerPayloadIsRejected() {

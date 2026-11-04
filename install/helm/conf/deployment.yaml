@@ -436,7 +436,8 @@ openid4vci:
 {{- $logRotation := default dict $logFile.rotation }}
 {{- $logSizeRotation := default dict $logRotation.size }}
 {{- $logTimeRotation := default dict $logRotation.time }}
-{{- if or $log.level (hasKey $logConsole "enabled") $logFile $logAccess.excludePaths }}
+{{- $logType := default dict $log.type }}
+{{- if or $log.level (hasKey $logConsole "enabled") $logFile $logAccess.excludePaths $logType.key $logType.audit }}
 
 log:
   {{- if $log.level }}
@@ -496,6 +497,36 @@ log:
     {{- range $logAccess.excludePaths }}
       - {{ . | quote }}
     {{- end }}
+  {{- end }}
+  {{- if or $logType.key $logType.audit }}
+  type:
+    {{- if $logType.key }}
+    key: {{ $logType.key | quote }}
+    {{- end }}
+    {{- if $logType.audit }}
+    audit: {{ $logType.audit | quote }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- $audit := default dict .Values.configuration.audit }}
+{{- if or (hasKey $audit "enabled") $audit.delivery $audit.queueSize $audit.deliveryTimeoutSeconds $audit.instanceId }}
+
+audit:
+  {{- if hasKey $audit "enabled" }}
+  enabled: {{ $audit.enabled }}
+  {{- end }}
+  {{- if $audit.delivery }}
+  delivery: {{ $audit.delivery | quote }}
+  {{- end }}
+  {{- if $audit.queueSize }}
+  queue_size: {{ $audit.queueSize }}
+  {{- end }}
+  {{- if $audit.deliveryTimeoutSeconds }}
+  delivery_timeout_seconds: {{ $audit.deliveryTimeoutSeconds }}
+  {{- end }}
+  {{- if $audit.instanceId }}
+  instance_id: {{ $audit.instanceId | quote }}
   {{- end }}
 {{- end }}
 

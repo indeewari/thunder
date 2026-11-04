@@ -12,6 +12,19 @@ import (
 	"github.com/thunder-id/thunderid/internal/system/deployment"
 )
 
+// traceParentKey is the context key of the request's W3C traceparent.
+type traceParentKey struct{}
+
+// WithTraceParent returns ctx carrying the request's W3C traceparent, which NewEvent copies into the
+// envelope. A value that is not a valid version 00 traceparent, or has an all-zero trace or parent ID,
+// is ignored, and none is ever generated.
+func WithTraceParent(ctx context.Context, traceParent string) context.Context {
+	if !isValidTraceParent(traceParent) {
+		return ctx
+	}
+	return context.WithValue(ctx, traceParentKey{}, traceParent)
+}
+
 // Event is one fact with the payloads of the categories it belongs to.
 type Event struct {
 	envelope Envelope
@@ -23,10 +36,12 @@ type Event struct {
 // malformed event is reported by Publish, so the call chain stays fluent.
 func NewEvent(ctx context.Context, name string) *Event {
 	traceID, _ := ctx.Value(sysContext.TraceIDKey).(string)
+	traceParent, _ := ctx.Value(traceParentKey{}).(string)
 	evt := &Event{
 		envelope: Envelope{
 			Name:         name,
 			TraceID:      traceID,
+			TraceParent:  traceParent,
 			DeploymentID: deployment.Resolve(ctx),
 		},
 		payloads: make(map[Category]Payload),

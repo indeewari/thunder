@@ -635,6 +635,47 @@ type LogConfig struct {
 	Level  string          `yaml:"level"  json:"level"`
 	Output LogOutputConfig `yaml:"output" json:"output"`
 	Access LogAccessConfig `yaml:"access" json:"access"`
+	Type   LogTypeConfig   `yaml:"type"   json:"type"`
+}
+
+// LogTypeConfig holds the type marker that leads every audit line, so a line identifies its own kind
+// in any file or stream. Diagnostic lines carry no marker.
+type LogTypeConfig struct {
+	// Key is the name of the marker member.
+	Key string `yaml:"key" json:"key"`
+	// Audit is the marker value of audit lines.
+	Audit string `yaml:"audit" json:"audit"`
+}
+
+// maxAuditInstanceIDLength is the longest audit.instance_id accepted.
+const maxAuditInstanceIDLength = 255
+
+// AuditConfig holds the audit event settings.
+type AuditConfig struct {
+	// Enabled writes audit events to stdout. With audit off, events are still validated, then dropped.
+	Enabled *bool `yaml:"enabled" json:"enabled"`
+	// Delivery is the delivery guarantee of audit events. Only best_effort is supported.
+	Delivery string `yaml:"delivery" json:"delivery"`
+	// QueueSize is the number of events each audit sink can hold before it drops one.
+	QueueSize int `yaml:"queue_size" json:"queue_size"`
+	// DeliveryTimeoutSeconds bounds one delivery of an event to a sink.
+	DeliveryTimeoutSeconds int `yaml:"delivery_timeout_seconds" json:"delivery_timeout_seconds"`
+	// InstanceID identifies this process in audit lines. Empty selects the host name.
+	InstanceID string `yaml:"instance_id" json:"instance_id"`
+}
+
+// IsEnabled reports whether audit events are written.
+func (c AuditConfig) IsEnabled() bool {
+	return derefBool(c.Enabled)
+}
+
+// Validate rejects an instance ID too long to record. The event bus refuses a negative queue size or
+// delivery timeout and an unsupported delivery guarantee when it is built.
+func (c AuditConfig) Validate() error {
+	if len(c.InstanceID) > maxAuditInstanceIDLength {
+		return fmt.Errorf("audit.instance_id must be at most %d characters", maxAuditInstanceIDLength)
+	}
+	return nil
 }
 
 // LogAccessConfig holds the access log settings.
@@ -865,6 +906,7 @@ type Config struct {
 	AuthZENPDP                 AuthZENPDPConfig                  `yaml:"authzen_pdp"           json:"authzen_pdp"`
 	HTTPConnection             HTTPConnectionConfig              `yaml:"http_connection"       json:"http_connection"`
 	Log                        LogConfig                         `yaml:"log"                   json:"log"`
+	Audit                      AuditConfig                       `yaml:"audit"                 json:"audit"`
 	GateClient                 engineconfig.GateClientConfig     `yaml:"gate_client"           json:"gate_client"`
 	TLS                        TLSConfig                         `yaml:"tls"                   json:"tls"`
 	Database                   DatabaseConfig                    `yaml:"database"              json:"database"`
@@ -1040,37 +1082,48 @@ func LoadConfig(configPath string, defaultPath string, serverHome string) (*Conf
 		cfg.JWT.Issuer = engineconfig.GetServerURL(&cfg.Server)
 	}
 
-	if err := cfg.Server.SecurityConfig.Validate(); err != nil {
-		return nil, err
-	}
-
-	// Validate ACR-AMR mapping.
-	if err := cfg.OAuth.AuthClass.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.OAuth.DPoP.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.OAuth.ClientAssertion.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.OAuth.TokenExchange.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.OAuth.Logout.Backchannel.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.OAuth.AuthorizationDetails.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.Notification.Validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.AuthZENPDP.Validate(); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+// validate checks every section of the configuration that has rules of its own.
+func (c *Config) validate() error {
+	if err := c.Server.SecurityConfig.Validate(); err != nil {
+		return err
+	}
+
+	// Validate ACR-AMR mapping.
+	if err := c.OAuth.AuthClass.Validate(); err != nil {
+		return err
+	}
+	if err := c.OAuth.DPoP.Validate(); err != nil {
+		return err
+	}
+	if err := c.OAuth.ClientAssertion.Validate(); err != nil {
+		return err
+	}
+	if err := c.OAuth.TokenExchange.Validate(); err != nil {
+		return err
+	}
+	if err := c.OAuth.Logout.Backchannel.Validate(); err != nil {
+		return err
+	}
+	if err := c.OAuth.AuthorizationDetails.Validate(); err != nil {
+		return err
+	}
+	if err := c.Notification.Validate(); err != nil {
+		return err
+	}
+	if err := c.AuthZENPDP.Validate(); err != nil {
+		return err
+	}
+	if err := c.Audit.Validate(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // loadDefaultConfig loads the default configuration from a JSON file.

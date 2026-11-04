@@ -88,6 +88,7 @@ func (s *EventBusServiceTestSuite) TestEnvelopeCarriesEveryField() {
 	rec := subscribe[payloadOne](&s.busSuite, bus, "one", nil)
 	ctx := sysContext.WithTraceID(context.Background(), "trace-1")
 	ctx = deployment.WithID(ctx, "deployment-1")
+	ctx = WithTraceParent(ctx, validTraceParent)
 
 	before := time.Now().UTC().Truncate(time.Microsecond)
 	s.Require().NoError(bus.Publish(ctx, s.event(ctx, testEventName, payloadOne{})))
@@ -104,6 +105,7 @@ func (s *EventBusServiceTestSuite) TestEnvelopeCarriesEveryField() {
 	s.False(env.Time.Before(before))
 	s.False(env.Time.After(after))
 	s.Equal("trace-1", env.TraceID)
+	s.Equal(validTraceParent, env.TraceParent)
 	s.Equal("deployment-1", env.DeploymentID)
 	s.Equal(testSource, env.Source)
 	s.Equal(testInstanceID, env.InstanceID)

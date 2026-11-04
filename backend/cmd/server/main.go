@@ -29,6 +29,9 @@ import (
 	"github.com/thunder-id/thunderid/internal/system/constants"
 	sysContext "github.com/thunder-id/thunderid/internal/system/context"
 	"github.com/thunder-id/thunderid/internal/system/database/provider"
+	"github.com/thunder-id/thunderid/internal/system/eventbus"
+	"github.com/thunder-id/thunderid/internal/system/eventbus/audit"
+	"github.com/thunder-id/thunderid/internal/system/eventbus/defaultaudit"
 	"github.com/thunder-id/thunderid/internal/system/jose/jwt"
 	"github.com/thunder-id/thunderid/internal/system/kmprovider/common"
 	"github.com/thunder-id/thunderid/internal/system/log"
@@ -40,6 +43,14 @@ import (
 
 // shutdownTimeout defines the timeout duration for graceful shutdown.
 const shutdownTimeout = 5 * time.Second
+
+const (
+	// auditSource names this binary in every audit line.
+	auditSource = "server"
+	// auditShutdownTimeout bounds how long queued audit events drain at shutdown, within
+	// shutdownTimeout.
+	auditShutdownTimeout = 2 * time.Second
+)
 
 var (
 	netListen = net.Listen
@@ -72,6 +83,9 @@ func main() {
 	if err := logger.Configure(cfg.Log.BuildOutputOptions(serverHome)); err != nil {
 		logger.Fatal(ctx, "Failed to configure log output", log.Error(err))
 	}
+
+	// Build the audit event bus before any service, so nothing that publishes can start without it.
+	auditBus, auditStopper := initAuditBus(ctx, logger, cfg)
 
 	// Initialize the cache manager.
 	cacheManager := cache.Initialize(cfg.Cache, cfg.Server.Identifier)
@@ -123,7 +137,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Create the HTTP server.
-	server := createHTTPServer(ctx, logger, cfg, mux, jwtService, revocationEnforcer)
+	server := createHTTPServer(ctx, logger, cfg, mux, jwtService, revocationEnforcer, auditBus)
 	var ln net.Listener
 	if cfg.Server.HTTPOnly {
 		logger.Info(ctx, "TLS is not enabled, starting server without TLS")
@@ -155,7 +169,25 @@ func main() {
 	// Wait for shutdown signal
 	<-sigChan
 	logger.Info(ctx, "Shutting down server...")
-	gracefulShutdown(ctx, logger, server, cacheManager, revocationSyncer, backchannelDispatcher, lockNotifier)
+	gracefulShutdown(ctx, logger, server, cacheManager, revocationSyncer, backchannelDispatcher, lockNotifier,
+		auditStopper)
+}
+
+// initAuditBus builds the audit event bus with the default stdout sink. A failure stops startup, so
+// the server never runs with audit silently missing.
+func initAuditBus(ctx context.Context, logger *log.Logger,
+	cfg *config.Config) (eventbus.EventBusInterface, eventbus.StopperInterface) {
+	bus, stopper, err := defaultaudit.Initialize(defaultaudit.Config{
+		Source:          auditSource,
+		ShutdownTimeout: auditShutdownTimeout,
+		Audit:           cfg.Audit,
+		LogType:         cfg.Log.Type,
+	})
+	if err != nil {
+		logger.Fatal(ctx, "Failed to initialize audit", log.Error(err))
+	}
+	logger.Info(ctx, "Audit events", log.Bool("enabled", cfg.Audit.IsEnabled()))
+	return bus, stopper
 }
 
 // initRevocationCache builds the Resource Server token-revocation enforcer and its background syncer
@@ -244,12 +276,25 @@ func accessLogExcludePaths(configured []string) []string {
 
 // createHTTPServer creates and configures an HTTP server with common settings.
 func createHTTPServer(ctx context.Context, logger *log.Logger, cfg *config.Config, mux *http.ServeMux,
-	jwtService jwt.JWTServiceInterface, revocationEnforcer revocationcache.EnforcerInterface) *http.Server {
-	securityMiddleware := createSecurityMiddleware(ctx, logger, cfg, mux, jwtService, revocationEnforcer)
+	jwtService jwt.JWTServiceInterface, revocationEnforcer revocationcache.EnforcerInterface,
+	auditBus eventbus.EventBusInterface) *http.Server {
+	// Inside the security layer, so the audit middleware sees the verified actor, and around the mux,
+	// so it sees the matched route.
+	auditManagement, err := audit.ManagementMiddleware(auditBus)
+	if err != nil {
+		logger.Fatal(ctx, "Failed to initialize the management audit middleware", log.Error(err))
+	}
+	// The security layer reports the mutating calls it refuses, which never reach the middleware above.
+	auditRejection, err := audit.RejectionHook(auditBus)
+	if err != nil {
+		logger.Fatal(ctx, "Failed to initialize the audit rejection hook", log.Error(err))
+	}
+	securityMiddleware := createSecurityMiddleware(ctx, logger, cfg, auditManagement(mux), jwtService,
+		revocationEnforcer, auditRejection)
 
 	// Build the middleware chain with proper execution order.
-	// Request flow: CorrelationID (outermost) -> DeploymentID -> SecurityHeaders -> AccessLog ->
-	// Security -> Route Handler (innermost)
+	// Request flow: CorrelationID (outermost) -> AuditContext -> DeploymentID -> SecurityHeaders ->
+	// AccessLog -> Security -> AuditManagement -> Route Handler (innermost)
 	// Note: Middlewares are wrapped in reverse order - the last added will execute first.
 	// The Gate and Console frontend paths are always excluded from the access log to keep it
 	// focused on API traffic. Additional prefixes can be excluded via log.access.exclude_paths.
@@ -258,6 +303,8 @@ func createHTTPServer(ctx context.Context, logger *log.Logger, cfg *config.Confi
 	// Outside the security layer, so that every request carries the deployment id it acts for by the
 	// time any store is reached.
 	handler = middleware.DeploymentIDMiddleware(handler)
+	// Outside the security layer, so an audit event about a refused request carries its client too.
+	handler = audit.ContextMiddleware(handler)
 	handler = middleware.CorrelationIDMiddleware(handler)
 
 	// Build the server address using hostname and port from the configurations.
@@ -296,8 +343,8 @@ func createTLSListener(ctx context.Context, logger *log.Logger, server *http.Ser
 }
 
 func createSecurityMiddleware(ctx context.Context, logger *log.Logger, cfg *config.Config,
-	mux *http.ServeMux, jwtService jwt.JWTServiceInterface,
-	revocationEnforcer revocationcache.EnforcerInterface) http.Handler {
+	mux http.Handler, jwtService jwt.JWTServiceInterface,
+	revocationEnforcer revocationcache.EnforcerInterface, onRejection security.RejectionHook) http.Handler {
 	// Record which posture is in force, so it is not inferred from a missing config key. Info, not
 	// Warn: leaving the audience unchecked is the documented default, and config validation already
 	// rejects the one value that would be a mistake.
@@ -310,7 +357,7 @@ func createSecurityMiddleware(ctx context.Context, logger *log.Logger, cfg *conf
 	}
 
 	middlewareFunc, err := security.Initialize(jwtService, revocationEnforcer, expectedAud,
-		cfg.Server.SecurityConfig.ManagementAPIKeyHash)
+		cfg.Server.SecurityConfig.ManagementAPIKeyHash, onRejection)
 	if err != nil {
 		logger.Fatal(ctx, "Failed to initialize security middleware", log.Error(err))
 	}
@@ -326,6 +373,7 @@ func gracefulShutdown(
 	revocationSyncer revocationcache.Syncer,
 	backchannelDispatcher backchannel.DispatcherInterface,
 	lockNotifier identitygovernance.LockNotifierInterface,
+	auditStopper eventbus.StopperInterface,
 ) {
 	ctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer cancel()
@@ -348,6 +396,10 @@ func gracefulShutdown(
 	if lockNotifier != nil {
 		lockNotifier.Stop()
 	}
+
+	// Stop audit once the HTTP server and the background workers have stopped, so their last events
+	// are still written.
+	auditStopper.Stop()
 
 	// Shutdown services
 	unregisterServices()

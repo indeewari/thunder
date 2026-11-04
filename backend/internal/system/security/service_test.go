@@ -171,7 +171,7 @@ func (suite *SecurityServiceTestSuite) TestProcess_SuccessfulAuthentication_Seco
 
 // TestInitialize verifies the security middleware is constructed successfully.
 func (suite *SecurityServiceTestSuite) TestInitialize() {
-	mw, err := Initialize(nil, nil, "", "")
+	mw, err := Initialize(nil, nil, "", "", nil)
 	suite.Require().NoError(err)
 	suite.Require().NotNil(mw)
 }
@@ -669,4 +669,132 @@ func TestOUScopedTokenEndpointIsTheOnlyPublicOUPath(t *testing.T) {
 		"nothing else beneath the prefix is")
 	assert.False(t, matches("/ou/customer-a/applications"),
 		"and an organization unit prefix does not make a management path public")
+}
+
+// rejection is one call of the rejection hook.
+type rejection struct {
+	subject string
+	method  string
+	path    string
+	status  int
+}
+
+// withRejectionHook gives the service a hook that records every call.
+func (suite *SecurityServiceTestSuite) withRejectionHook() *[]rejection {
+	calls := &[]rejection{}
+	suite.service.onRejection = func(ctx context.Context, r *http.Request, status int) {
+		*calls = append(*calls, rejection{subject: GetSubject(ctx), method: r.Method, path: r.URL.Path, status: status})
+	}
+	return calls
+}
+
+func (suite *SecurityServiceTestSuite) TestProcess_RejectionHook_UnauthenticatedMutationIsReportedWithoutASubject() {
+	calls := suite.withRejectionHook()
+	req := httptest.NewRequest(http.MethodPost, "/users", nil)
+	suite.mockAuth1.On("CanHandle", req).Return(false)
+	suite.mockAuth2.On("CanHandle", req).Return(false)
+
+	_, err := suite.service.Process(req)
+
+	suite.Equal(errNoHandlerFound, err)
+	suite.Equal([]rejection{{method: http.MethodPost, path: "/users", status: http.StatusUnauthorized}}, *calls)
+}
+
+func (suite *SecurityServiceTestSuite) TestProcess_RejectionHook_RefusedTokenIsReportedWithoutASubject() {
+	calls := suite.withRejectionHook()
+	req := httptest.NewRequest(http.MethodDelete, "/users/u1", nil)
+	suite.mockAuth1.On("CanHandle", req).Return(true)
+	suite.mockAuth1.On("Authenticate", req).Return(nil, errInvalidToken)
+
+	_, err := suite.service.Process(req)
+
+	suite.Equal(errInvalidToken, err)
+	suite.Equal([]rejection{{method: http.MethodDelete, path: "/users/u1", status: http.StatusUnauthorized}}, *calls)
+}
+
+// A revoked token authenticated before it was refused, but its subject is not one the layer accepted.
+func (suite *SecurityServiceTestSuite) TestProcess_RejectionHook_RevokedTokenIsReportedWithoutASubject() {
+	mockRevocation := &RevocationEnforcerInterfaceMock{}
+	mockRevocation.On("EnsureNotRevoked", mock.Anything, mock.Anything).Return(errors.New("revoked"))
+	service, err := newSecurityService(
+		[]AuthenticatorInterface{suite.mockAuth1}, mockRevocation, testPublicPaths, apiPermissionEntries)
+	suite.Require().NoError(err)
+	suite.service = service
+	calls := suite.withRejectionHook()
+	req := httptest.NewRequest(http.MethodPut, "/users/u1", nil)
+	suite.mockAuth1.On("CanHandle", req).Return(true)
+	suite.mockAuth1.On("Authenticate", req).Return(suite.testCtx, nil)
+
+	_, err = suite.service.Process(req)
+
+	suite.Equal(errInvalidToken, err)
+	suite.Equal([]rejection{{method: http.MethodPut, path: "/users/u1", status: http.StatusUnauthorized}}, *calls)
+}
+
+func (suite *SecurityServiceTestSuite) TestProcess_RejectionHook_ForbiddenMutationCarriesTheVerifiedSubject() {
+	calls := suite.withRejectionHook()
+	req := httptest.NewRequest(http.MethodPost, "/users", nil)
+	unprivileged := newSecurityContext("user123", "ou456", "test_token", []string{"other"}, nil)
+	suite.mockAuth1.On("CanHandle", req).Return(true)
+	suite.mockAuth1.On("Authenticate", req).Return(unprivileged, nil)
+
+	_, err := suite.service.Process(req)
+
+	suite.ErrorIs(err, errInsufficientPermissions)
+	expected := rejection{subject: "user123", method: http.MethodPost, path: "/users", status: http.StatusForbidden}
+	suite.Equal([]rejection{expected}, *calls)
+}
+
+func (suite *SecurityServiceTestSuite) TestProcess_RejectionHook_NotCalledForReads() {
+	calls := suite.withRejectionHook()
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		req := httptest.NewRequest(method, "/favicon.ico", nil)
+		suite.mockAuth1.On("CanHandle", req).Return(false)
+		suite.mockAuth2.On("CanHandle", req).Return(false)
+
+		_, err := suite.service.Process(req)
+
+		suite.Error(err)
+	}
+	suite.Empty(*calls)
+}
+
+func (suite *SecurityServiceTestSuite) TestProcess_RejectionHook_NotCalledForPublicPathsOrAcceptedRequests() {
+	calls := suite.withRejectionHook()
+	public := httptest.NewRequest(http.MethodPost, "/oauth2/token", nil)
+	suite.mockAuth1.On("CanHandle", public).Return(true)
+	suite.mockAuth1.On("Authenticate", public).Return(nil, errInvalidToken)
+	accepted := httptest.NewRequest(http.MethodPost, "/users", nil)
+	suite.mockAuth1.On("CanHandle", accepted).Return(true)
+	suite.mockAuth1.On("Authenticate", accepted).Return(suite.testCtx, nil)
+
+	_, err := suite.service.Process(public)
+	suite.NoError(err)
+	_, err = suite.service.Process(accepted)
+	suite.NoError(err)
+
+	suite.Empty(*calls)
+}
+
+// The hook observes a refusal and changes nothing about the response the caller receives.
+func (suite *SecurityServiceTestSuite) TestMiddleware_RejectionHookLeavesTheResponseUnchanged() {
+	serve := func(service *securityService) *httptest.ResponseRecorder {
+		handler, err := middleware(service)
+		suite.Require().NoError(err)
+		req := httptest.NewRequest(http.MethodPost, "/users", nil)
+		recorder := httptest.NewRecorder()
+		handler(http.NotFoundHandler()).ServeHTTP(recorder, req)
+		return recorder
+	}
+	suite.mockAuth1.On("CanHandle", mock.Anything).Return(false)
+	suite.mockAuth2.On("CanHandle", mock.Anything).Return(false)
+
+	without := serve(suite.service)
+	calls := suite.withRejectionHook()
+	with := serve(suite.service)
+
+	suite.Len(*calls, 1)
+	suite.Equal(without.Code, with.Code)
+	suite.Equal(without.Header(), with.Header())
+	suite.Equal(without.Body.String(), with.Body.String())
 }

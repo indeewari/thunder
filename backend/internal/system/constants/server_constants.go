@@ -33,6 +33,9 @@ const RetryAfterHeaderName = "Retry-After"
 // the request's trace ID across service boundaries.
 const CorrelationIDHeaderName = "X-Correlation-ID"
 
+// TraceParentHeaderName is the name of the W3C trace context header that carries the caller's trace.
+const TraceParentHeaderName = "traceparent"
+
 // HostHeaderName is the name of the Host header. Go carries the inbound host on http.Request.Host
 // rather than in http.Request.Header, so it is surfaced under this key when capturing request data.
 const HostHeaderName = "Host"

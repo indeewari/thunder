@@ -6,6 +6,7 @@ package eventbus
 import (
 	"context"
 	"reflect"
+	"strings"
 
 	"github.com/thunder-id/thunderid/internal/system/log"
 )
@@ -82,4 +83,16 @@ func validatePayload(validator PayloadValidator) (err error) {
 		}
 	}()
 	return validator.Validate()
+}
+
+// isValidTraceParent reports whether value is a version 00 traceparent whose trace and parent IDs are
+// not all zero.
+func isValidTraceParent(value string) bool {
+	if !traceParentPattern.MatchString(value) {
+		return false
+	}
+	_, rest, _ := strings.Cut(value, "-")
+	traceID, rest, _ := strings.Cut(rest, "-")
+	parentID, _, _ := strings.Cut(rest, "-")
+	return traceID != zeroTraceID && parentID != zeroParentID
 }

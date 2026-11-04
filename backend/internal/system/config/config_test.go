@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -2042,5 +2043,122 @@ func TestApplyAndImportTimeoutsAreSeconds(t *testing.T) {
 	if (GatewayConfig{ApplyTimeoutSeconds: math.MaxInt}).ApplyTimeout() != 0 ||
 		(ImportConfig{TimeoutSeconds: 9223372037}).Timeout() != 0 {
 		t.Error("a timeout too large for a duration should be zero rather than wrap around")
+	}
+}
+
+// A deployment turns audit off and changes the marker value, and keeps every other shipped default.
+func (suite *ConfigTestSuite) TestAuditConfigOverridesTheShippedDefaults() {
+	base := &Config{
+		Audit: AuditConfig{Enabled: boolPtr(true), Delivery: "best_effort", QueueSize: 1024, DeliveryTimeoutSeconds: 5},
+		Log:   LogConfig{Type: LogTypeConfig{Key: "log_type", Audit: "AUDIT"}},
+	}
+	user := &Config{
+		Audit: AuditConfig{Enabled: boolPtr(false), QueueSize: 64, InstanceID: "node-a"},
+		Log:   LogConfig{Type: LogTypeConfig{Audit: "SECURITY_AUDIT"}},
+	}
+
+	mergeConfigs(base, user)
+
+	assert.False(suite.T(), base.Audit.IsEnabled(), "false must override the true default")
+	assert.Equal(suite.T(), "best_effort", base.Audit.Delivery)
+	assert.Equal(suite.T(), 64, base.Audit.QueueSize)
+	assert.Equal(suite.T(), 5, base.Audit.DeliveryTimeoutSeconds)
+	assert.Equal(suite.T(), "node-a", base.Audit.InstanceID)
+	assert.Equal(suite.T(), LogTypeConfig{Key: "log_type", Audit: "SECURITY_AUDIT"}, base.Log.Type)
+
+	kept := &Config{Audit: AuditConfig{Enabled: boolPtr(true)}}
+	mergeConfigs(kept, &Config{})
+	assert.True(suite.T(), kept.Audit.IsEnabled(), "an omitted value keeps the default")
+}
+
+// Audit is on by default, with the marker and limits the specification ships.
+func (suite *ConfigTestSuite) TestTheShippedDefaultsTurnAuditOn() {
+	data, err := os.ReadFile("../../../cmd/server/config/default.json")
+	suite.Require().NoError(err)
+	var defaults Config
+	suite.Require().NoError(json.Unmarshal(data, &defaults))
+
+	assert.True(suite.T(), defaults.Audit.IsEnabled())
+	assert.Equal(suite.T(), AuditConfig{
+		Enabled: boolPtr(true), Delivery: "best_effort", QueueSize: 1024, DeliveryTimeoutSeconds: 5,
+	}, defaults.Audit)
+	assert.Equal(suite.T(), LogTypeConfig{Key: "log_type", Audit: "AUDIT"}, defaults.Log.Type)
+	assert.NoError(suite.T(), defaults.Audit.Validate())
+}
+
+// The deployment file accepts the audit and log type keys, which it would refuse were they unknown.
+func (suite *ConfigTestSuite) TestLoadConfigReadsTheAuditKeys() {
+	tempDir := suite.T().TempDir()
+	userFile := suite.createTempFile(tempDir, "audit*.yaml", `
+server:
+  hostname: "user-host"
+  port: 8095
+notification:
+  otp:
+    length: 6
+    use_numeric_only: true
+    validity_period_seconds: 120
+audit:
+  enabled: false
+  delivery: "best_effort"
+  queue_size: 32
+  delivery_timeout_seconds: 2
+  instance_id: "node-a"
+log:
+  type:
+    key: "record_kind"
+    audit: "SECURITY_AUDIT"
+`)
+
+	cfg, err := LoadConfig(userFile, "", tempDir)
+
+	suite.Require().NoError(err)
+	assert.Equal(suite.T(), AuditConfig{
+		Enabled: boolPtr(false), Delivery: "best_effort", QueueSize: 32, DeliveryTimeoutSeconds: 2,
+		InstanceID: "node-a",
+	}, cfg.Audit)
+	assert.Equal(suite.T(), LogTypeConfig{Key: "record_kind", Audit: "SECURITY_AUDIT"}, cfg.Log.Type)
+}
+
+func (suite *ConfigTestSuite) TestLoadConfigRejectsAnInvalidAuditConfig() {
+	tempDir := suite.T().TempDir()
+	userFile := suite.createTempFile(tempDir, "audit-invalid*.yaml", `
+server:
+  hostname: "user-host"
+  port: 8095
+notification:
+  otp:
+    length: 6
+    use_numeric_only: true
+    validity_period_seconds: 120
+audit:
+  instance_id: "`+strings.Repeat("i", maxAuditInstanceIDLength+1)+`"
+`)
+
+	cfg, err := LoadConfig(userFile, "", tempDir)
+
+	assert.Nil(suite.T(), cfg)
+	assert.ErrorContains(suite.T(), err, "audit.instance_id")
+}
+
+func (suite *ConfigTestSuite) TestAuditConfigValidate() {
+	for _, tc := range []struct {
+		name  string
+		cfg   AuditConfig
+		field string
+	}{
+		{"unset values keep their defaults", AuditConfig{}, ""},
+		{"the longest instance id", AuditConfig{InstanceID: strings.Repeat("i", maxAuditInstanceIDLength)}, ""},
+		{"an instance id that is too long",
+			AuditConfig{InstanceID: strings.Repeat("i", maxAuditInstanceIDLength+1)}, "audit.instance_id"},
+	} {
+		suite.Run(tc.name, func() {
+			err := tc.cfg.Validate()
+			if tc.field == "" {
+				assert.NoError(suite.T(), err)
+				return
+			}
+			assert.ErrorContains(suite.T(), err, tc.field)
+		})
 	}
 }

@@ -853,3 +853,4 @@ packages:
       filename: "{{.InterfaceName}}_mock.go"
     interfaces:
       EventBusInterface:
+      Subscriber:
