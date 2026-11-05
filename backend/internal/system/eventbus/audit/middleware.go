@@ -14,20 +14,23 @@ import (
 )
 
 // ContextMiddleware records where the request came from and its W3C trace context on the request
-// context, so a payload built below it resolves them. The client address is the TCP peer address:
-// forwarded headers are caller controlled and are never read.
+// context, so a payload built below it resolves them, and a marker that building a payload sets. The
+// client address is the TCP peer address: forwarded headers are caller controlled and are never read.
 func ContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := withClient(r.Context(), r)
 		ctx = eventbus.WithTraceParent(ctx, r.Header.Get(constants.TraceParentHeaderName))
+		ctx = withPayloadMarker(ctx)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // ManagementMiddleware publishes an event on bus for every mutating management API call that reaches
 // the routes behind it, named by the route table, or management.request for a path the table does not
-// name. It wraps the mux inside the security middleware: the mux tells it whether a route
-// matched, and the security middleware puts the actor on the request context.
+// name. A call during which a service built an audit payload already has its event, so it publishes
+// none for it unless its route is always recorded. It wraps the mux inside the security middleware:
+// the mux tells it whether a route matched, and the security middleware puts the actor on the request
+// context.
 func ManagementMiddleware(bus eventbus.EventBusInterface) (func(http.Handler) http.Handler, error) {
 	if bus == nil {
 		return nil, errNilBus
@@ -43,7 +46,8 @@ func ManagementMiddleware(bus eventbus.EventBusInterface) (func(http.Handler) ht
 
 			// Read only now: the mux sets the pattern while it serves the request. No pattern means
 			// no route matched.
-			if r.Pattern == "" || isExcluded(r.URL.Path) {
+			if r.Pattern == "" || isExcluded(r.URL.Path) ||
+				(isPayloadBuilt(r.Context()) && !isAlwaysRecorded(r.Method, r.URL.Path)) {
 				return
 			}
 			ctx := r.Context()

@@ -11,7 +11,17 @@ const (
 	// EventManagementRequest names a mutating management API call on a path the route table does not
 	// name, so that no such call goes unrecorded.
 	EventManagementRequest = "management.request"
+
+	// EventUserCreate names an attempt to create a user.
+	EventUserCreate = "user.create"
+	// EventUserUpdate names an attempt to change a user.
+	EventUserUpdate = "user.update"
+	// EventUserDelete names an attempt to delete a user.
+	EventUserDelete = "user.delete"
 )
+
+// TargetTypeUser is the target type of an event about a user.
+const TargetTypeUser = "user"
 
 // catalogEntry describes one audited event.
 type catalogEntry struct {

@@ -173,6 +173,127 @@ func (ts *AuditLogTestSuite) TestARefusedMutatingCallIsRecordedAsDenied() {
 	ts.Equal(map[string]string{"result": "denied", "reason": "forbidden"}, forbidden.Outcome)
 }
 
+// Creating, updating and deleting a user through the management API writes one line each, published by
+// the user service with the user as target and subject, and no second line from the management wrapper.
+// The password the user is created with appears in no line.
+func (ts *AuditLogTestSuite) TestAUserLifecycleWritesOneLinePerChange() {
+	ouID, userType := ts.createUserType("lifecycle")
+	adminID := ts.adminUserID()
+	username := strings.ToLower(ts.prefix) + "lifecycle"
+	password := "AuditLifecycle123!"
+
+	created, body := ts.exchange(testutils.GetHTTPClient(), http.MethodPost, "/users", fmt.Sprintf(
+		`{"ouId":%q,"type":%q,"attributes":{"username":%q,"password":%q}}`, ouID, userType, username, password))
+	ts.Require().Equal(http.StatusCreated, created.StatusCode, string(body))
+	var user testutils.User
+	ts.Require().NoError(json.Unmarshal(body, &user))
+	ts.Require().NotEmpty(user.ID)
+	ts.T().Cleanup(func() { _ = testutils.DeleteUser(user.ID) })
+	updated := ts.send(http.MethodPut, "/users/"+user.ID, fmt.Sprintf(
+		`{"ouId":%q,"type":%q,"attributes":{"username":%q}}`, ouID, userType, username+"-renamed"))
+	ts.Require().Equal(http.StatusOK, updated.StatusCode)
+	deleted := ts.send(http.MethodDelete, "/users/"+user.ID, "")
+	ts.Require().Equal(http.StatusNoContent, deleted.StatusCode)
+
+	userRef := testutils.AuditRef{Type: "user", ID: user.ID}
+	for _, tc := range []struct {
+		response *http.Response
+		event    string
+		action   string
+	}{
+		{created, "user.create", "create"},
+		{updated, "user.update", "update"},
+		{deleted, "user.delete", "delete"},
+	} {
+		line := ts.onlyLineOf(tc.response)
+		ts.Equal(tc.event, line.Event)
+		ts.Equal(tc.action, line.Action)
+		ts.Equal(userRef, line.Target, tc.event)
+		ts.Equal(userRef, line.Subject, tc.event)
+		ts.Equal(testutils.AuditRef{Type: "user", ID: adminID}, line.Actor, tc.event)
+		ts.Equal(map[string]string{"result": "succeeded"}, line.Outcome, tc.event)
+		ts.NotContains(line.Raw, password, "a credential is never recorded")
+		ts.NotContains(line.Raw, `"details"`, "a user event carries no details")
+	}
+}
+
+// An update of a user that does not exist reaches the user service, which records the failed attempt.
+func (ts *AuditLogTestSuite) TestAnUpdateOfAMissingUserIsRecordedAsFailed() {
+	missing := unusedUserID()
+	ouID, userType := ts.createUserType("missing")
+
+	updated := ts.send(http.MethodPut, "/users/"+missing, fmt.Sprintf(
+		`{"ouId":%q,"type":%q,"attributes":{"username":"nobody"}}`, ouID, userType))
+	ts.Require().Equal(http.StatusNotFound, updated.StatusCode)
+
+	line := ts.onlyLineOf(updated)
+	ts.Equal("user.update", line.Event)
+	ts.Equal(testutils.AuditRef{Type: "user", ID: missing}, line.Target)
+	ts.Equal(testutils.AuditRef{}, line.Subject, "a user that was not changed is not the subject")
+	ts.Equal(map[string]string{"result": "failed", "reason": "usr_1003"}, line.Outcome)
+}
+
+// An import that creates a user writes the user service's event for the user and the import's own line,
+// and the lookup that decides between update and create writes nothing.
+func (ts *AuditLogTestSuite) TestAnImportWritesItsUserEventsAndItsOwnLine() {
+	ouID, userType := ts.createUserType("import")
+	userID := unusedUserID()
+	username := strings.ToLower(ts.prefix) + "imported"
+	password := "AuditImport123!"
+	request, err := json.Marshal(testutils.ImportRequest{
+		Content: fmt.Sprintf("resource_type: user\nid: %s\ntype: %s\nouId: %s\nattributes:\n  username: %s\n"+
+			"credentials:\n  password: %s\n", userID, userType, ouID, username, password),
+		Options: testutils.ImportOptions{Upsert: true, ContinueOnError: true, Target: "runtime"},
+	})
+	ts.Require().NoError(err)
+
+	imported, body := ts.exchange(testutils.GetHTTPClient(), http.MethodPost, "/import", string(request))
+	ts.Require().Equal(http.StatusOK, imported.StatusCode, string(body))
+	ts.T().Cleanup(func() { _ = testutils.DeleteUser(userID) })
+	var result testutils.ImportResponse
+	ts.Require().NoError(json.Unmarshal(body, &result))
+	ts.Require().Equal(1, result.Summary.Imported, string(body))
+
+	lines := ts.linesOf(imported, 2)
+	userRef := testutils.AuditRef{Type: "user", ID: userID}
+	ts.Equal("user.create", lines[0].Event)
+	ts.Equal(userRef, lines[0].Target)
+	ts.Equal(userRef, lines[0].Subject)
+	ts.Equal(map[string]string{"result": "succeeded"}, lines[0].Outcome)
+	ts.Equal("configuration.import", lines[1].Event)
+	ts.Equal(testutils.AuditRef{Type: "configuration"}, lines[1].Target)
+	ts.Equal(map[string]string{"result": "succeeded"}, lines[1].Outcome)
+	for _, line := range lines {
+		ts.NotContains(line.Raw, password, "a credential is never recorded")
+	}
+}
+
+// A create the handler rejects as invalid JSON never reaches the user service, so the management wrapper
+// records it under the same name, failed, and without an ID.
+func (ts *AuditLogTestSuite) TestAUserCreateWithInvalidJSONIsRecordedByTheWrapper() {
+	rejected := ts.send(http.MethodPost, "/users", `{"ouId":`)
+	ts.Require().Equal(http.StatusBadRequest, rejected.StatusCode)
+
+	line := ts.onlyLineOf(rejected)
+	ts.Equal("user.create", line.Event)
+	ts.Equal(testutils.AuditRef{Type: "user"}, line.Target)
+	ts.Equal(testutils.AuditRef{}, line.Subject)
+	ts.Equal(map[string]string{"result": "failed", "reason": "invalid_request"}, line.Outcome)
+}
+
+// A create without a token never reaches the routes, so the security layer's rejection hook records it,
+// once.
+func (ts *AuditLogTestSuite) TestARefusedUserCreateIsRecordedOnceByTheRejectionHook() {
+	refused := ts.sendWith(testutils.GetRawHTTPClient(), http.MethodPost, "/users", `{"ouId":"x"}`)
+	ts.Require().Equal(http.StatusUnauthorized, refused.StatusCode)
+
+	line := ts.onlyLineOf(refused)
+	ts.Equal("user.create", line.Event)
+	ts.Equal(testutils.AuditRef{Type: "anonymous"}, line.Actor)
+	ts.Equal(testutils.AuditRef{Type: "user"}, line.Target)
+	ts.Equal(map[string]string{"result": "denied", "reason": "unauthorized"}, line.Outcome)
+}
+
 // A read the security layer refuses is not recorded.
 func (ts *AuditLogTestSuite) TestARefusedReadIsNotRecorded() {
 	refused := ts.sendWith(testutils.GetRawHTTPClient(), http.MethodGet, "/variables", "")
@@ -277,6 +398,13 @@ func (ts *AuditLogTestSuite) send(method, path, body string) *http.Response {
 // sendWith makes a management call with client.
 func (ts *AuditLogTestSuite) sendWith(client *http.Client, method, path, body string) *http.Response {
 	ts.T().Helper()
+	resp, _ := ts.exchange(client, method, path, body)
+	return resp
+}
+
+// exchange makes a management call with client and returns the response and its body.
+func (ts *AuditLogTestSuite) exchange(client *http.Client, method, path, body string) (*http.Response, []byte) {
+	ts.T().Helper()
 	var reader io.Reader
 	if body != "" {
 		reader = bytes.NewReader([]byte(body))
@@ -288,9 +416,10 @@ func (ts *AuditLogTestSuite) sendWith(client *http.Client, method, path, body st
 	}
 	resp, err := client.Do(req)
 	ts.Require().NoError(err)
-	_, _ = io.Copy(io.Discard, resp.Body)
+	read, err := io.ReadAll(resp.Body)
+	ts.Require().NoError(err)
 	ts.Require().NoError(resp.Body.Close())
-	return resp
+	return resp, read
 }
 
 // tokenRequestWithAnUnknownClient makes a token request a client authentication refuses, a protocol
@@ -346,6 +475,59 @@ func (ts *AuditLogTestSuite) serverLogSince(offset int64) string {
 	return string(data[min(offset, int64(len(data))):])
 }
 
+// onlyLineOf waits for the audit line of the call that got response and returns it, after checking the
+// call wrote no other line.
+func (ts *AuditLogTestSuite) onlyLineOf(response *http.Response) testutils.AuditLine {
+	ts.T().Helper()
+	return ts.linesOf(response, 1)[0]
+}
+
+// linesOf waits for the want audit lines of the call that got response and returns them in the order
+// they were written, after checking the call wrote no more.
+func (ts *AuditLogTestSuite) linesOf(response *http.Response, want int) []testutils.AuditLine {
+	ts.T().Helper()
+	traceID := response.Header.Get(correlationIDHeader)
+	ts.Require().NotEmpty(traceID)
+	ofCall := func() ([]testutils.AuditLine, error) {
+		lines, err := ts.reader.Read()
+		var matched []testutils.AuditLine
+		for _, line := range lines {
+			if line.TraceID == traceID {
+				matched = append(matched, line)
+			}
+		}
+		return matched, err
+	}
+	ts.Require().Eventually(func() bool {
+		lines, err := ofCall()
+		return err == nil && len(lines) >= want
+	}, 30*time.Second, 250*time.Millisecond, "the call wrote fewer than %d audit lines", want)
+	ts.Never(func() bool {
+		lines, err := ofCall()
+		return err != nil || len(lines) > want
+	}, quietPeriod, 100*time.Millisecond, "the call wrote more than %d audit lines", want)
+	lines, err := ofCall()
+	ts.Require().NoError(err)
+	ts.Require().Len(lines, want)
+	return lines
+}
+
+// unusedUserID returns a user ID no user of this or an earlier run has.
+func unusedUserID() string {
+	return fmt.Sprintf("01900000-0000-7000-8000-%012x", time.Now().UnixNano()&0xffffffffffff)
+}
+
+// adminUserID returns the ID of the user the admin token was issued to.
+func (ts *AuditLogTestSuite) adminUserID() string {
+	ts.T().Helper()
+	resp, body := ts.exchange(testutils.GetHTTPClient(), http.MethodGet, "/users/me", "")
+	ts.Require().Equal(http.StatusOK, resp.StatusCode, string(body))
+	var admin testutils.User
+	ts.Require().NoError(json.Unmarshal(body, &admin))
+	ts.Require().NotEmpty(admin.ID)
+	return admin.ID
+}
+
 // awaitDenied waits for the denied line of the refused request with traceID.
 func (ts *AuditLogTestSuite) awaitDenied(traceID string) testutils.AuditLine {
 	ts.T().Helper()
@@ -357,20 +539,21 @@ func (ts *AuditLogTestSuite) awaitDenied(traceID string) testutils.AuditLine {
 	return line
 }
 
-// createUserWithoutPermissions creates a user who holds no management permission, removed when the
-// test ends, and returns its ID and a client that calls with its token.
-func (ts *AuditLogTestSuite) createUserWithoutPermissions() (string, *http.Client) {
+// createUserType creates an organization unit and a user type in it with a username and a password,
+// both removed when the test ends, and returns the unit's ID and the type's handle. name keeps the
+// handles of two calls in one run apart.
+func (ts *AuditLogTestSuite) createUserType(name string) (string, string) {
 	ts.T().Helper()
-	suffix := strings.ToLower(ts.prefix)
+	handle := strings.ReplaceAll(strings.ToLower(ts.prefix), "_", "-") + name
 	ouID, err := testutils.CreateOrganizationUnit(testutils.OrganizationUnit{
-		Handle: strings.ReplaceAll(suffix, "_", "-") + "ou",
+		Handle: handle + "-ou",
 		Name:   "Audit Log Test OU",
 	})
 	ts.Require().NoError(err)
 	ts.T().Cleanup(func() { _ = testutils.DeleteOrganizationUnit(ouID) })
 
 	userType := testutils.UserType{
-		Handle:      strings.ReplaceAll(suffix, "_", "-") + "person",
+		Handle:      handle + "-person",
 		DisplayName: "Audit Log Test Person",
 		OUID:        ouID,
 		Schema: map[string]interface{}{
@@ -381,12 +564,20 @@ func (ts *AuditLogTestSuite) createUserWithoutPermissions() (string, *http.Clien
 	userTypeID, err := testutils.CreateUserType(userType)
 	ts.Require().NoError(err)
 	ts.T().Cleanup(func() { _ = testutils.DeleteUserType(userTypeID) })
+	return ouID, userType.Handle
+}
 
-	username := suffix + "user"
+// createUserWithoutPermissions creates a user who holds no management permission, removed when the
+// test ends, and returns its ID and a client that calls with its token.
+func (ts *AuditLogTestSuite) createUserWithoutPermissions() (string, *http.Client) {
+	ts.T().Helper()
+	ouID, userType := ts.createUserType("refused")
+
+	username := strings.ToLower(ts.prefix) + "user"
 	password := "AuditLogTest123!"
 	attributes, err := json.Marshal(map[string]interface{}{"username": username, "password": password})
 	ts.Require().NoError(err)
-	userID, err := testutils.CreateUser(testutils.User{OUID: ouID, Type: userType.Handle, Attributes: attributes})
+	userID, err := testutils.CreateUser(testutils.User{OUID: ouID, Type: userType, Attributes: attributes})
 	ts.Require().NoError(err)
 	ts.T().Cleanup(func() { _ = testutils.DeleteUser(userID) })
 

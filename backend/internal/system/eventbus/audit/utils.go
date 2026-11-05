@@ -9,12 +9,55 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/thunder-id/thunderid/internal/system/eventbus"
 )
 
 // clientKey is the context key of the request's Client.
 type clientKey struct{}
+
+// payloadMarkerKey is the context key of the request's payloadMarker.
+type payloadMarkerKey struct{}
+
+// payloadMarker records whether an audit payload was built while a request was served. A handler may
+// build payloads on several goroutines, so the flag is atomic.
+type payloadMarker struct {
+	built atomic.Bool
+}
+
+// ReasonFromCode derives a stable outcome reason from a service error code, as usr_1003 from USR-1003.
+// A code that cannot make a valid reason gives server_error.
+func ReasonFromCode(code string) string {
+	reason := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, strings.ToLower(code))
+	if !reasonPattern.MatchString(reason) {
+		return reasonServerError
+	}
+	return reason
+}
+
+// withPayloadMarker returns ctx carrying a marker no payload has been built on.
+func withPayloadMarker(ctx context.Context) context.Context {
+	return context.WithValue(ctx, payloadMarkerKey{}, &payloadMarker{})
+}
+
+// markPayloadBuilt records on the marker ctx carries, if any, that an audit payload was built.
+func markPayloadBuilt(ctx context.Context) {
+	if marker, ok := ctx.Value(payloadMarkerKey{}).(*payloadMarker); ok {
+		marker.built.Store(true)
+	}
+}
+
+// isPayloadBuilt reports whether an audit payload was built on the marker ctx carries.
+func isPayloadBuilt(ctx context.Context) bool {
+	marker, ok := ctx.Value(payloadMarkerKey{}).(*payloadMarker)
+	return ok && marker.built.Load()
+}
 
 // withClient returns ctx carrying where r came from.
 func withClient(ctx context.Context, r *http.Request) context.Context {
@@ -67,7 +110,7 @@ func outcomeOf(status int) Outcome {
 	case status == http.StatusUnauthorized:
 		return OutcomeDenied(reasonUnauthorized)
 	case status == http.StatusForbidden:
-		return OutcomeDenied(reasonForbidden)
+		return OutcomeDenied(ReasonForbidden)
 	case status == http.StatusBadRequest:
 		return OutcomeFailed(reasonInvalidRequest)
 	case status == http.StatusNotFound:

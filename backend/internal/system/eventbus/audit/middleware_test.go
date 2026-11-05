@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/thunder-id/thunderid/internal/system/constants"
+	"github.com/thunder-id/thunderid/internal/system/eventbus"
 	"github.com/thunder-id/thunderid/tests/mocks/eventbusmock"
 )
 
@@ -331,6 +333,152 @@ func (s *MiddlewareTestSuite) TestTheRecorderPassesFlushAndUnwrapThrough() {
 	s.True(response.Flushed)
 	s.Equal(OutcomeSucceeded, awaitEvent(s.T(), events).payload.Outcome(),
 		"a status written after the body is not the status the client saw")
+}
+
+// publishingHandler answers with status after publishing, on bus, one user.create event per ID in
+// userIDs, built from the request context as a service does.
+func publishingHandler(bus eventbus.EventBusInterface, status int, userIDs ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		for _, id := range userIDs {
+			target := Ref{Type: TargetTypeUser, ID: id}
+			eventbus.TryPublish(ctx, bus, eventbus.NewEvent(ctx, EventUserCreate).
+				With(NewPayload(ctx, target, ActionCreate, OutcomeSucceeded).WithSubject(target)))
+		}
+		w.WriteHeader(status)
+	}
+}
+
+func (s *MiddlewareTestSuite) TestAServiceEventIsTheOnlyEventOfTheRequest() {
+	bus, events := newAuditBus(s.T())
+	mux := testMux("POST " + barrierPath)
+	mux.HandleFunc("POST /users", publishingHandler(bus, http.StatusCreated, testUserID))
+	handler := newServingChain(s.T(), bus, mux)
+	token := accessToken(s.T(), map[string]interface{}{"sub": testUserID})
+
+	s.Equal(http.StatusCreated, serve(handler, newRequest(http.MethodPost, "/users", token, "")).Code)
+
+	evt := awaitEvent(s.T(), events)
+	s.Equal(EventUserCreate, evt.env.Name)
+	s.Equal(Ref{Type: TargetTypeUser, ID: testUserID}, evt.payload.Target())
+	s.expectOnlyTheBarrier(handler, events, token)
+}
+
+func (s *MiddlewareTestSuite) TestEveryServiceEventOfARequestIsWrittenAndTheWrapperWritesNone() {
+	bus, events := newAuditBus(s.T())
+	mux := testMux("POST " + barrierPath)
+	mux.HandleFunc("POST /users", publishingHandler(bus, http.StatusCreated, "u1", "u2"))
+	handler := newServingChain(s.T(), bus, mux)
+	token := accessToken(s.T(), map[string]interface{}{"sub": testUserID})
+
+	serve(handler, newRequest(http.MethodPost, "/users", token, ""))
+
+	s.Equal(Ref{Type: TargetTypeUser, ID: "u1"}, awaitEvent(s.T(), events).payload.Target())
+	s.Equal(Ref{Type: TargetTypeUser, ID: "u2"}, awaitEvent(s.T(), events).payload.Target())
+	s.expectOnlyTheBarrier(handler, events, token)
+}
+
+// An import changes more than the events of the services it reaches describe, so its own event is
+// written beside theirs.
+func (s *MiddlewareTestSuite) TestAnImportIsRecordedBesideTheServiceEventsOfItsChanges() {
+	bus, events := newAuditBus(s.T())
+	mux := testMux("POST " + barrierPath)
+	mux.HandleFunc("POST /import", publishingHandler(bus, http.StatusOK, "u1", "u2"))
+	mux.HandleFunc("POST /import/delete", publishingHandler(bus, http.StatusOK, "u3"))
+	handler := newServingChain(s.T(), bus, mux)
+	token := accessToken(s.T(), map[string]interface{}{"sub": testUserID})
+
+	serve(handler, newRequest(http.MethodPost, "/import", token, ""))
+	serve(handler, newRequest(http.MethodPost, "/import/delete", token, ""))
+
+	for _, want := range []struct {
+		name   string
+		target Ref
+	}{
+		{EventUserCreate, Ref{Type: TargetTypeUser, ID: "u1"}},
+		{EventUserCreate, Ref{Type: TargetTypeUser, ID: "u2"}},
+		{"configuration.import", Ref{Type: "configuration"}},
+		{EventUserCreate, Ref{Type: TargetTypeUser, ID: "u3"}},
+		{"configuration.delete", Ref{Type: "configuration"}},
+	} {
+		evt := awaitEvent(s.T(), events)
+		s.Equal(want.name, evt.env.Name)
+		s.Equal(want.target, evt.payload.Target())
+	}
+	s.expectOnlyTheBarrier(handler, events, token)
+}
+
+// A payload built but never delivered still silences the wrapper: the failed publish is already logged.
+func (s *MiddlewareTestSuite) TestAPayloadThatFailedToPublishStillSilencesTheWrapper() {
+	bus := eventbusmock.NewEventBusInterfaceMock(s.T())
+	bus.EXPECT().Publish(mock.Anything, mock.Anything).Return(errors.New("audit queue is full")).Once()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /users", publishingHandler(bus, http.StatusCreated, testUserID))
+	handler := newServingChain(s.T(), bus, mux)
+
+	response := serve(handler, newRequest(http.MethodPost, "/users",
+		accessToken(s.T(), map[string]interface{}{"sub": testUserID}), ""))
+
+	s.Equal(http.StatusCreated, response.Code)
+}
+
+// A call that ends before any service builds a payload, as on invalid JSON, is recorded by the wrapper.
+func (s *MiddlewareTestSuite) TestACallThatFailsBeforeAnyServiceIsRecordedByTheWrapper() {
+	bus, events := newAuditBus(s.T())
+	handler := newServingChain(s.T(), bus, testMux("POST /users", "POST "+barrierPath))
+	token := accessToken(s.T(), map[string]interface{}{"sub": testUserID})
+
+	s.Equal(http.StatusBadRequest,
+		serve(handler, newRequest(http.MethodPost, "/users?status=400", token, "")).Code)
+
+	evt := awaitEvent(s.T(), events)
+	s.Equal(EventUserCreate, evt.env.Name)
+	s.Equal(Ref{Type: TargetTypeUser}, evt.payload.Target())
+	s.Equal(OutcomeFailed("invalid_request"), evt.payload.Outcome())
+	s.expectOnlyTheBarrier(handler, events, token)
+}
+
+// A refused call never reaches the handler, so the rejection hook records it and nothing else does.
+func (s *MiddlewareTestSuite) TestARefusedCallIsRecordedOnceByTheRejectionHook() {
+	bus, events := newAuditBus(s.T())
+	mux := testMux("POST " + barrierPath)
+	mux.HandleFunc("POST /users", publishingHandler(bus, http.StatusCreated, testUserID))
+	handler := newServingChain(s.T(), bus, mux)
+
+	s.Equal(http.StatusUnauthorized, serve(handler, newRequest(http.MethodPost, "/users", "", "")).Code)
+
+	evt := awaitEvent(s.T(), events)
+	s.Equal(EventUserCreate, evt.env.Name)
+	s.Equal(Ref{Type: TargetTypeUser}, evt.payload.Target())
+	s.Equal(OutcomeDenied("unauthorized"), evt.payload.Outcome())
+	s.expectOnlyTheBarrier(handler, events, accessToken(s.T(), map[string]interface{}{"sub": testUserID}))
+}
+
+// Each request has a marker of its own, so one request's service event never silences another's
+// wrapper, whatever the interleaving.
+func (s *MiddlewareTestSuite) TestConcurrentRequestsKeepTheirOwnMarker() {
+	const requests = 20
+	bus, events := newAuditBus(s.T())
+	mux := testMux("POST /groups")
+	mux.HandleFunc("POST /users", publishingHandler(bus, http.StatusCreated, testUserID))
+	handler := newServingChain(s.T(), bus, mux)
+	token := accessToken(s.T(), map[string]interface{}{"sub": testUserID})
+
+	var wg sync.WaitGroup
+	for i := range requests {
+		path := "/users"
+		if i%2 == 1 {
+			path = "/groups"
+		}
+		wg.Go(func() { serve(handler, newRequest(http.MethodPost, path, token, "")) })
+	}
+	wg.Wait()
+
+	names := map[string]int{}
+	for range requests {
+		names[awaitEvent(s.T(), events).env.Name]++
+	}
+	s.Equal(map[string]int{EventUserCreate: requests / 2, "group.create": requests / 2}, names)
 }
 
 func (s *MiddlewareTestSuite) TestANilBusIsRefused() {

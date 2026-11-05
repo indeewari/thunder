@@ -48,8 +48,11 @@ type Payload struct {
 
 // NewPayload builds the audit payload of an attempt on target. The actor, the principal it acted
 // for and the client are resolved from ctx, which carries the verified security context and what
-// ContextMiddleware recorded. Every ID is cut to 128 characters.
+// ContextMiddleware recorded. Every ID is cut to 128 characters. Building it marks the request as
+// recorded, so ManagementMiddleware writes no second event for it.
 func NewPayload(ctx context.Context, target Ref, action Action, outcome Outcome) Payload {
+	// Marked when built, not when delivered: a failed publish is logged and counted, never redone by the wrapper.
+	markPayloadBuilt(ctx)
 	actor, onBehalfOf := resolveActor(ctx)
 	actor.ID = capID(actor.ID)
 	onBehalfOf.ID = capID(onBehalfOf.ID)

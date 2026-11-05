@@ -106,12 +106,15 @@ func main() {
 	}
 
 	// Register the services.
-	jwtService, runtimeCryptoSvc, importService, mcpServer := registerServices(mux, cacheManager)
+	jwtService, runtimeCryptoSvc, importService, mcpServer := registerServices(mux, cacheManager, auditBus)
 
 	// When invoked as the bootstrap one-shot (`cpserver bootstrap`), create the
 	// default resources in-process and exit without starting the HTTP server.
 	if isBootstrapInvocation() {
-		if err := runBootstrap(ctx, logger, serverHome, importService, cacheManager); err != nil {
+		err := runBootstrap(ctx, logger, serverHome, importService, cacheManager)
+		// The bootstrap creates users, whose audit events must be written before the process exits.
+		auditStopper.Stop()
+		if err != nil {
 			logger.Error(ctx, "In-process bootstrap failed; exiting", log.Error(err))
 			os.Exit(1)
 		}

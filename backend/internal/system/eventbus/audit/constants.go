@@ -65,6 +65,9 @@ const (
 	ResultFailed Result = "failed"
 )
 
+// ReasonForbidden is the reason of an attempt denied because the caller lacks the permission for it.
+const ReasonForbidden = "forbidden"
+
 const (
 	// The token claims the actor is read from. They are declared here rather than imported from the
 	// OAuth package, which the Control Plane must not link.
@@ -86,7 +89,6 @@ const (
 
 	// Reason codes of an outcome taken from a response status.
 	reasonUnauthorized   = "unauthorized"
-	reasonForbidden      = "forbidden"
 	reasonInvalidRequest = "invalid_request"
 	reasonNotFound       = "not_found"
 	reasonConflict       = "conflict"

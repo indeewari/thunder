@@ -191,3 +191,14 @@ func (s *RoutesTestSuite) TestTheActionOfAMatchedRoute() {
 	s.Require().True(ok)
 	s.Equal(ActionRestore, restore.actionFor(http.MethodPost, http.StatusCreated))
 }
+
+// Only the import routes are recorded beside the service events of a call.
+func (s *RoutesTestSuite) TestOnlyTheImportRoutesAreRecordedBesideServiceEvents() {
+	var recorded []string
+	for _, route := range managementRoutes {
+		if route.alwaysRecorded {
+			recorded = append(recorded, route.path)
+		}
+	}
+	s.Equal([]string{"/import", "/import/delete"}, recorded)
+}

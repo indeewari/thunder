@@ -6,6 +6,7 @@ package audit
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -174,4 +175,39 @@ func (s *PayloadTestSuite) TestBuildersReturnIndependentCopies() {
 	s.Equal(ActionCreate, built.Action())
 	s.Equal(OutcomeSucceeded, built.Outcome())
 	s.Equal(CategoryAudit, built.Category())
+}
+
+func (s *PayloadTestSuite) TestBuildingAPayloadMarksTheRequest() {
+	ctx := withPayloadMarker(context.Background())
+	s.False(isPayloadBuilt(ctx))
+
+	NewPayload(ctx, testTarget, ActionUpdate, OutcomeFailed("usr_1003"))
+
+	s.True(isPayloadBuilt(ctx))
+	s.True(isPayloadBuilt(context.WithValue(ctx, clientKey{}, Client{})), "a derived context shares the marker")
+}
+
+// Background work and tests build payloads on a context no request marked.
+func (s *PayloadTestSuite) TestAContextWithoutAMarkerStillBuildsAPayload() {
+	ctx := context.Background()
+
+	payload := NewPayload(ctx, testTarget, ActionUpdate, OutcomeSucceeded)
+
+	s.Equal(testTarget, payload.Target())
+	s.False(isPayloadBuilt(ctx))
+}
+
+func (s *PayloadTestSuite) TestPayloadsBuiltConcurrentlyInOneRequestMarkIt() {
+	ctx := withPayloadMarker(context.Background())
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			NewPayload(ctx, testTarget, ActionUpdate, OutcomeSucceeded)
+			s.True(isPayloadBuilt(ctx))
+		})
+	}
+	wg.Wait()
+
+	s.True(isPayloadBuilt(ctx))
 }

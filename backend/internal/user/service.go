@@ -26,6 +26,8 @@ import (
 	"github.com/thunder-id/thunderid/internal/sharing"
 	serverconst "github.com/thunder-id/thunderid/internal/system/constants"
 	declarativeresource "github.com/thunder-id/thunderid/internal/system/declarative_resource"
+	"github.com/thunder-id/thunderid/internal/system/eventbus"
+	"github.com/thunder-id/thunderid/internal/system/eventbus/audit"
 	"github.com/thunder-id/thunderid/internal/system/filter"
 	"github.com/thunder-id/thunderid/internal/system/log"
 	"github.com/thunder-id/thunderid/internal/system/resourcedependency"
@@ -93,6 +95,7 @@ type userService struct {
 	valueCapturer      declarativeresource.ValueCapturer
 	sharingService     sharing.SharingServiceInterface
 	sharingDeclaration *userSharingDeclaration
+	bus                eventbus.EventBusInterface
 }
 
 // newUserService creates a new instance of userService with injected dependencies.
@@ -104,6 +107,7 @@ func newUserService(
 	governance identitygovernance.IdentityGovernanceServiceInterface,
 	valueCapturer declarativeresource.ValueCapturer,
 	sharingService sharing.SharingServiceInterface,
+	bus eventbus.EventBusInterface,
 ) *userService {
 	us := &userService{
 		authzService:      authzService,
@@ -114,6 +118,7 @@ func newUserService(
 		uuidGenerator:     utils.GenerateUUIDv7,
 		valueCapturer:     valueCapturer,
 		sharingService:    sharingService,
+		bus:               bus,
 	}
 	us.sharingDeclaration = newUserSharingDeclaration(us, sharingService)
 	return us
@@ -325,6 +330,14 @@ func (us *userService) GetUsersByPath(
 func (us *userService) CreateUser(
 	ctx context.Context, user *providers.User,
 ) (*providers.User, *tidcommon.ServiceError) {
+	created, svcErr := us.createUser(ctx, user)
+	return us.publishCreate(ctx, created, svcErr)
+}
+
+// createUser creates the user without publishing its audit event.
+func (us *userService) createUser(
+	ctx context.Context, user *providers.User,
+) (*providers.User, *tidcommon.ServiceError) {
 	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
 
 	if user == nil {
@@ -376,6 +389,15 @@ func (us *userService) CreateUser(
 func (us *userService) CreateUserByPath(
 	ctx context.Context, handlePath string, request CreateUserByPathRequest,
 ) (*providers.User, *tidcommon.ServiceError) {
+	created, svcErr := us.createUserByPath(ctx, handlePath, request)
+	return us.publishCreate(ctx, created, svcErr)
+}
+
+// createUserByPath creates a new user under the organization unit of the handle path without publishing
+// its audit event.
+func (us *userService) createUserByPath(
+	ctx context.Context, handlePath string, request CreateUserByPathRequest,
+) (*providers.User, *tidcommon.ServiceError) {
 	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
 	logger.Debug(ctx, "Creating user by path",
 		log.String("path", handlePath), log.String("type", request.Type))
@@ -405,7 +427,7 @@ func (us *userService) CreateUserByPath(
 		Attributes: request.Attributes,
 	}
 
-	return us.CreateUser(ctx, user)
+	return us.createUser(ctx, user)
 }
 
 // GetUser retrieves a user by ID.
@@ -540,6 +562,14 @@ func (as *userService) GetUserGroups(ctx context.Context, userID string, limit, 
 // UpdateUser update the user for given user id.
 func (us *userService) UpdateUser(
 	ctx context.Context, userID string, user *providers.User) (*providers.User, *tidcommon.ServiceError) {
+	updated, svcErr := us.updateUser(ctx, userID, user)
+	us.publishUserEvent(ctx, audit.EventUserUpdate, audit.ActionUpdate, userID, svcErr)
+	return updated, svcErr
+}
+
+// updateUser updates the user for the given user id without publishing its audit event.
+func (us *userService) updateUser(
+	ctx context.Context, userID string, user *providers.User) (*providers.User, *tidcommon.ServiceError) {
 	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
 	logger.Debug(ctx, "Updating user", log.MaskedString(log.LoggerKeyUserID, userID))
 
@@ -654,6 +684,15 @@ func (us *userService) UpdateUser(
 
 // UpdateUserAttributes updates only the attributes of a user while preserving immutable fields.
 func (us *userService) UpdateUserAttributes(
+	ctx context.Context, userID string, attributes json.RawMessage,
+) (*providers.User, *tidcommon.ServiceError) {
+	updated, svcErr := us.updateUserAttributes(ctx, userID, attributes)
+	us.publishUserEvent(ctx, audit.EventUserUpdate, audit.ActionUpdate, userID, svcErr)
+	return updated, svcErr
+}
+
+// updateUserAttributes updates only the attributes of a user without publishing its audit event.
+func (us *userService) updateUserAttributes(
 	ctx context.Context, userID string, attributes json.RawMessage,
 ) (*providers.User, *tidcommon.ServiceError) {
 	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
@@ -864,6 +903,13 @@ func (us *userService) ValidateDeleteUser(ctx context.Context, userID string) *t
 
 // DeleteUser deletes the user with the given ID.
 func (us *userService) DeleteUser(ctx context.Context, userID string) *tidcommon.ServiceError {
+	svcErr := us.deleteUser(ctx, userID)
+	us.publishUserEvent(ctx, audit.EventUserDelete, audit.ActionDelete, userID, svcErr)
+	return svcErr
+}
+
+// deleteUser deletes the user with the given ID without publishing its audit event.
+func (us *userService) deleteUser(ctx context.Context, userID string) *tidcommon.ServiceError {
 	logger := log.GetLogger().With(log.String(log.LoggerKeyComponentName, loggerComponentName))
 	logger.Debug(ctx, "Deleting user", log.MaskedString(log.LoggerKeyUserID, userID))
 
@@ -929,6 +975,29 @@ func (us *userService) DeleteUser(ctx context.Context, userID string) *tidcommon
 
 	logger.Debug(ctx, "Successfully deleted user", log.MaskedString(log.LoggerKeyUserID, userID))
 	return nil
+}
+
+// publishCreate publishes the audit event of an attempt to create a user and returns its result.
+func (us *userService) publishCreate(ctx context.Context, created *providers.User,
+	svcErr *tidcommon.ServiceError) (*providers.User, *tidcommon.ServiceError) {
+	var userID string
+	if svcErr == nil {
+		userID = created.ID
+	}
+	us.publishUserEvent(ctx, audit.EventUserCreate, audit.ActionCreate, userID, svcErr)
+	return created, svcErr
+}
+
+// publishUserEvent publishes the audit event of an attempt on the user with userID, after the change
+// committed or was refused. Only a user the attempt changed is the event's subject.
+func (us *userService) publishUserEvent(ctx context.Context, name string, action audit.Action, userID string,
+	svcErr *tidcommon.ServiceError) {
+	target := audit.Ref{Type: audit.TargetTypeUser, ID: userID}
+	payload := audit.NewPayload(ctx, target, action, userAuditOutcome(svcErr))
+	if svcErr == nil {
+		payload = payload.WithSubject(target)
+	}
+	eventbus.TryPublish(ctx, us.bus, eventbus.NewEvent(ctx, name).With(payload))
 }
 
 // ensureNoBlockingDependencies refuses deletion when other resources depend on the user in a way
@@ -1239,6 +1308,19 @@ func logErrorAndReturnServerError(ctx context.Context,
 	}
 	logger.Error(ctx, message, fields...)
 	return &tidcommon.InternalServerError
+}
+
+// userAuditOutcome maps the result of a user change to its audit outcome: a refusal by the access check
+// is denied as forbidden, and any other error failed, with the reason derived from the error code.
+func userAuditOutcome(svcErr *tidcommon.ServiceError) audit.Outcome {
+	switch {
+	case svcErr == nil:
+		return audit.OutcomeSucceeded
+	case svcErr.Code == tidcommon.ErrorUnauthorized.Code:
+		return audit.OutcomeDenied(audit.ReasonForbidden)
+	default:
+		return audit.OutcomeFailed(audit.ReasonFromCode(svcErr.Code))
+	}
 }
 
 // mapEntityError maps entity service errors to user service errors.

@@ -37,6 +37,7 @@ import (
 	sysContext "github.com/thunder-id/thunderid/internal/system/context"
 	"github.com/thunder-id/thunderid/internal/system/cryptolib"
 	"github.com/thunder-id/thunderid/internal/system/eventbus"
+	"github.com/thunder-id/thunderid/internal/system/eventbus/audit"
 	"github.com/thunder-id/thunderid/internal/system/eventbus/defaultaudit"
 	"github.com/thunder-id/thunderid/internal/system/log"
 	"github.com/thunder-id/thunderid/internal/system/revocationcache"
@@ -844,4 +845,75 @@ func TestInitAuditBus_ExitsOnAnInvalidMarker(t *testing.T) {
 	}
 
 	runExitHelper(t, helperEnv, "TestInitAuditBus_ExitsOnAnInvalidMarker")
+}
+
+// An import that creates a user writes the user service's event and the import's own, and an import that
+// fails before any service, as on invalid JSON, still writes the event of its route.
+func TestCreateHTTPServer_AuditsAnImportBesideItsServiceEvents(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Server: engineconfig.ServerConfig{
+			Hostname:   "localhost",
+			HTTPOnly:   true,
+			Identifier: "audit-deployment",
+			SecurityConfig: engineconfig.SecurityConfig{
+				ManagementAPIKeyHash: cryptolib.HashToken(testAuditAPIKey),
+			},
+		},
+		Audit: config.AuditConfig{Enabled: &enabled, Delivery: "best_effort", QueueSize: 1024,
+			DeliveryTimeoutSeconds: 5},
+		Log: config.LogConfig{Type: config.LogTypeConfig{Key: "log_type", Audit: "AUDIT"}},
+	}
+	config.ResetServerRuntime()
+	require.NoError(t, config.InitializeServerRuntime("", cfg))
+	t.Cleanup(config.ResetServerRuntime)
+	security.InitSystemPermissions("")
+	enforcer, _, err := revocationcache.Initialize(revocationcache.Config{})
+	require.NoError(t, err)
+
+	read := captureStdout(t)
+	bus, stopper := initAuditBus(context.Background(), log.GetLogger(), cfg)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /import", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Has("invalid") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		ctx := r.Context()
+		user := audit.Ref{Type: audit.TargetTypeUser, ID: "u1"}
+		eventbus.TryPublish(ctx, bus, eventbus.NewEvent(ctx, audit.EventUserCreate).
+			With(audit.NewPayload(ctx, user, audit.ActionCreate, audit.OutcomeSucceeded).WithSubject(user)))
+		w.WriteHeader(http.StatusOK)
+	})
+	server := createHTTPServer(context.Background(), log.GetLogger(), cfg, mux, nil, enforcer, bus)
+
+	for _, target := range []string{"/import", "/import?invalid"} {
+		request := httptest.NewRequest(http.MethodPost, target, nil)
+		request.Header.Set(constants.APIKeyHeaderName, testAuditAPIKey)
+		server.Handler.ServeHTTP(httptest.NewRecorder(), request)
+	}
+	stopper.Stop()
+
+	lines := read()
+	require.Len(t, lines, 3)
+	type auditLine struct {
+		Event   string            `json:"event"`
+		Subject map[string]string `json:"subject"`
+		Target  map[string]string `json:"target"`
+		Outcome map[string]string `json:"outcome"`
+	}
+	var created, imported, invalid auditLine
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &created))
+	assert.Equal(t, audit.EventUserCreate, created.Event)
+	assert.Equal(t, map[string]string{"type": "user", "id": "u1"}, created.Target)
+	assert.Equal(t, map[string]string{"type": "user", "id": "u1"}, created.Subject)
+	assert.Equal(t, map[string]string{"result": "succeeded"}, created.Outcome)
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &imported))
+	assert.Equal(t, "configuration.import", imported.Event)
+	assert.Equal(t, map[string]string{"type": "configuration"}, imported.Target)
+	assert.Equal(t, map[string]string{"result": "succeeded"}, imported.Outcome)
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &invalid))
+	assert.Equal(t, "configuration.import", invalid.Event)
+	assert.Equal(t, map[string]string{"type": "configuration"}, invalid.Target)
+	assert.Equal(t, map[string]string{"result": "failed", "reason": "invalid_request"}, invalid.Outcome)
 }

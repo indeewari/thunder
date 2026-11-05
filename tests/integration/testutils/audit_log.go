@@ -31,6 +31,7 @@ type AuditLine struct {
 	BootID        string            `json:"boot_id"`
 	Seq           uint64            `json:"seq"`
 	Actor         AuditRef          `json:"actor"`
+	Subject       AuditRef          `json:"subject"`
 	Target        AuditRef          `json:"target"`
 	Action        string            `json:"action"`
 	Outcome       map[string]string `json:"outcome"`
