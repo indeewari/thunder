@@ -1200,7 +1200,9 @@ func (s *service) publish(ctx context.Context, record sessionAudit) {
 		}
 		payload = payload.WithSessionRef(record.sessionID)
 	}
-	payload = payload.WithApplication(record.application)
+	if record.application != "" {
+		payload = payload.WithApplication(record.application)
+	}
 	if record.endReason != "" {
 		payload = payload.WithDetails(map[string]string{audit.DetailEndReason: string(record.endReason)})
 	}
